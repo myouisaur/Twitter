@@ -2,12 +2,14 @@
 // @name         [Twitter/X] Image Zoom on Hover
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      2.15
+// @version      2.16
 // @description  Expands image presentation upon hover for enhanced visibility.
 // @author       Xiv
 // @match        https://*.twitter.com/*
 // @match        https://*.x.com/*
 // @grant        GM_addStyle
+// @updateURL    https://myouisaur.github.io/Twitter/zoom-on-hover.user.js
+// @downloadURL  https://myouisaur.github.io/Twitter/zoom-on-hover.user.js
 // ==/UserScript==
 
 (function () {
