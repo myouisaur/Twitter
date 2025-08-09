@@ -2,7 +2,7 @@
 // @name         [Twitter/X] Image Zoom on Hover
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      2.16
+// @version      2.17
 // @description  Expands image presentation upon hover for enhanced visibility.
 // @author       Xiv
 // @match        https://*.twitter.com/*
@@ -150,10 +150,7 @@
             }
             if (!/twimg\.com\/media\//.test(src)) return false;
             if (img.closest('[aria-label="Profile"]') || img.closest('svg')) return false;
-            let rect = img.getBoundingClientRect();
-            let vw = window.innerWidth;
-            let vh = window.innerHeight;
-            if (rect.width >= 0.9 * vw || rect.height >= 0.9 * vh) return false;
+            // Removed viewport size restriction so it works for any image size
             return true;
         },
         getFullImageUrl: function (img) {
