@@ -2,7 +2,7 @@
 // @name         [Twitter/X] Image Zoom on Hover
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      2.18
+// @version      2.19
 // @description  Expands image presentation upon hover for enhanced visibility, except on dedicated photo pages.
 // @author       Xiv
 // @match        https://*.twitter.com/*
@@ -151,8 +151,16 @@
             if (!/twimg\.com\/media\//.test(src)) return false;
             if (img.closest('[aria-label="Profile"]') || img.closest('svg')) return false;
 
-            // NEW: Skip if viewing dedicated image/photo page
-            if (/\/status\/\d+\/photo\/\d+/.test(location.pathname)) return false;
+            // NEW: Skip only the main center image on dedicated photo pages, not sidebar images
+            if (/\/status\/\d+\/photo\/\d+/.test(location.pathname)) {
+                // Check if this image is the main photo viewer (typically has specific parent containers)
+                if (img.closest('[data-testid="photoViewer"]') || 
+                    img.closest('[aria-label*="Image"]') ||
+                    img.style.maxHeight === '100vh' ||
+                    img.style.maxWidth === '100vw') {
+                    return false;
+                }
+            }
 
             // Viewport size restriction removed so it works for any image size
             return true;
