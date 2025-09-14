@@ -2,7 +2,7 @@
 // @name         [Twitter/X] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      1.0
+// @version      1.2
 // @description  Adds open + download buttons to Twitter/X images/videos.
 // @author       Xiv
 // @match        https://*.twitter.com/*
@@ -73,6 +73,20 @@
   }
   function forceLargeUrl(url) {
     if (!url.includes('twimg.com')) return url;
+
+    // Header photos (banners)
+    if (/\/profile_banners\//.test(url)) {
+      let clean = url.split('?')[0];
+      clean = clean.replace(/\/\d+x\d+$/, '/1500x500');
+      return clean;
+    }
+
+    // Profile photos (avatars)
+    if (/\/profile_images\//.test(url)) {
+      return url.split('?')[0];
+    }
+
+    // Normal post media
     const u = new URL(url);
     u.searchParams.set('name', 'orig');
     return u.toString();
@@ -113,12 +127,21 @@
     if (!el || el.nextSibling?.classList?.contains('xiv-btn-container')) return;
     const parent = el.parentElement;
     if (!parent) return;
+
     if (!/relative|absolute|fixed|sticky/i.test(getComputedStyle(parent).position)) {
       parent.style.position = 'relative';
     }
 
     const container = document.createElement('div');
     container.className = 'xiv-btn-container';
+
+    // Reposition for profile photos (bottom-center inside circle)
+    if (/\/profile_images\//.test(url)) {
+      container.style.top = 'auto';
+      container.style.bottom = '12px';
+      container.style.right = '50%';
+      container.style.transform = 'translateX(50%)';
+    }
 
     const openBtn = document.createElement('div');
     openBtn.className = 'xiv-tw-btn';
@@ -141,8 +164,7 @@
     container.appendChild(openBtn);
     container.appendChild(dlBtn);
 
-    if (el.nextSibling) parent.insertBefore(container, el.nextSibling);
-    else parent.appendChild(container);
+    parent.appendChild(container);
   }
 
   // --- Feed ---
@@ -179,7 +201,7 @@
     });
   }
 
-  // --- Modal polling (only while open) ---
+  // --- Modal polling ---
   let modalInterval = null;
   function startModalPolling() {
     if (modalInterval) clearInterval(modalInterval);
@@ -202,5 +224,5 @@
   observer.observe(document.body, { childList: true, subtree: true });
   window.addEventListener('load', injectFeed);
 
-  console.log('[Twitter/X Media Extractor] Lightweight version loaded.');
+  console.log('[Twitter/X Media Extractor] Loaded (profile + header fixes).');
 })();
