@@ -2,11 +2,11 @@
 // @name         [Twitter/X] Image Zoom on Hover
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      2.19
+// @version      2.20
 // @description  Expands image presentation upon hover for enhanced visibility, except on dedicated photo pages.
 // @author       Xiv
-// @match        https://*.twitter.com/*
-// @match        https://*.x.com/*
+// @match        *://*.twitter.com/*
+// @match        *://*.x.com/*
 // @grant        GM_addStyle
 // @updateURL    https://myouisaur.github.io/Twitter/zoom-on-hover.user.js
 // @downloadURL  https://myouisaur.github.io/Twitter/zoom-on-hover.user.js
@@ -61,7 +61,7 @@
                         </svg>
                     </div>
                     <div dir="ltr" class="${labelDivClasses}" style="color: inherit;">
-                        <span class="${spanClasses}">Imagus: <span class="onoff" style="color:${hoverEnabled ? accent : "#888"};">
+                        <span class="${spanClasses}">Image Zoom: <span class="onoff" style="color:${hoverEnabled ? accent : "#888"};">
                             ${hoverEnabled ? 'ON' : 'OFF'}
                         </span></span>
                     </div>
