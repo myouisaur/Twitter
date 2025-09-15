@@ -2,11 +2,11 @@
 // @name         [Twitter/X] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      1.2
+// @version      1.3
 // @description  Adds open + download buttons to Twitter/X images/videos.
 // @author       Xiv
-// @match        https://*.twitter.com/*
-// @match        https://*.x.com/*
+// @match        *://*.twitter.com/*
+// @match        *://*.x.com/*
 // @grant        GM_addStyle
 // @updateURL    https://myouisaur.github.io/Twitter/media-extractor.user.js
 // @downloadURL  https://myouisaur.github.io/Twitter/media-extractor.user.js
@@ -224,5 +224,4 @@
   observer.observe(document.body, { childList: true, subtree: true });
   window.addEventListener('load', injectFeed);
 
-  console.log('[Twitter/X Media Extractor] Loaded (profile + header fixes).');
 })();
