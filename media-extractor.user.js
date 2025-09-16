@@ -2,7 +2,7 @@
 // @name         [Twitter/X] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      1.3
+// @version      1.4
 // @description  Adds open + download buttons to Twitter/X images/videos.
 // @author       Xiv
 // @match        *://*.twitter.com/*
@@ -22,8 +22,8 @@
       top: 8px;
       right: 8px;
       display: flex !important;
-      gap: 4px;
-      z-index: 9999 !important;
+      gap: 6px;
+      z-index: 999999 !important;
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.15s ease;
@@ -36,28 +36,27 @@
       pointer-events: auto !important;
     }
     .xiv-tw-btn {
-      width: 34px;
-      height: 34px;
-      background: rgba(0,0,0,0.8);
+      width: 36px;
+      height: 36px;
+      background: rgba(0,0,0,0.4);
       backdrop-filter: blur(6px);
       color: white;
-      border-radius: 8px;
+      border-radius: 10px;
       cursor: pointer;
-      border: 1px solid rgba(255,255,255,0.18);
+      border: 1px solid rgba(255,255,255,0.1);
       display: flex !important;
       align-items: center;
       justify-content: center;
       font-size: 15px;
-      box-shadow: 0 4px 10px rgba(0,0,0,0.35);
-      margin-left: 4px;
-      transition: transform 0.15s ease, opacity 0.15s ease;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.2);
+      transition: transform 0.12s ease, opacity 0.12s ease;
     }
     .xiv-tw-btn:hover {
       transform: scale(1.06);
     }
     .xiv-tw-btn:active {
       transform: scale(0.98);
-      opacity: 0.85;
+      opacity: 0.9;
     }
   `);
 
