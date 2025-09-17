@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         [[[STAGING] [Twitter/X] Media Extractor
+// @name         [Twitter/X] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      1.6
+// @version      1.7
 // @description  Adds open + download buttons to Twitter/X images/videos.
 // @author       Xiv
 // @match        *://*.twitter.com/*
