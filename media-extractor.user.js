@@ -2,8 +2,8 @@
 // @name         [Twitter/X] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      1.7
-// @description  Adds open + download buttons to Twitter/X images/videos.
+// @version      2.2
+// @description  Adds open + download buttons to Twitter/X images/videos with clean filenames and original extensions preserved.
 // @author       Xiv
 // @match        *://*.twitter.com/*
 // @match        *://*.x.com/*
@@ -28,7 +28,6 @@
       pointer-events: none;
       transition: opacity 0.15s ease;
     }
-    /* Hover as a unit */
     img:hover + .xiv-btn-container,
     video:hover + .xiv-btn-container,
     .xiv-btn-container:hover {
@@ -70,29 +69,25 @@
     const h = el.naturalHeight || el.videoHeight || el.offsetHeight || 0;
     return w >= 200 && h >= 200;
   }
-  function getResolution(el) {
-    const w = el.naturalWidth || el.videoWidth || el.offsetWidth || 0;
-    const h = el.naturalHeight || el.videoHeight || el.offsetHeight || 0;
-    return `${w}x${h}`;
-  }
   function forceLargeUrl(url) {
     if (!url.includes('twimg.com')) return url;
 
-    // Header photos (banners)
     if (/\/profile_banners\//.test(url)) {
       let clean = url.split('?')[0];
       clean = clean.replace(/\/\d+x\d+$/, '/1500x500');
       return clean;
     }
-
-    // Profile photos (avatars)
     if (/\/profile_images\//.test(url)) {
       return url.split('?')[0];
     }
-
-    // Normal post media
+    if (/\/media\//.test(url)) {
+      let baseUrl = url.split('?')[0];
+      baseUrl = baseUrl.replace(/:(small|medium|large|thumb)$/, '');
+      return baseUrl + '?format=jpg&name=orig';
+    }
     const u = new URL(url);
     u.searchParams.set('name', 'orig');
+    u.searchParams.set('format', 'jpg');
     return u.toString();
   }
   function isAdaptive(url) {
@@ -106,6 +101,13 @@
     }
     return video.currentSrc || video.src || '';
   }
+  function getExtension(url, adaptive) {
+    if (adaptive) return url.endsWith('.m3u8') ? '.m3u8' : '.mpd';
+    const match = url.match(/\.([a-zA-Z0-9]+)(?:\?|$)/);
+    return match ? `.${match[1].toLowerCase()}` : '.jpg';
+  }
+
+  // --- Download ---
   function downloadMedia(url, filename, adaptive = false) {
     if (!url) return;
     if (adaptive) {
@@ -113,54 +115,6 @@
       return window.open(url, '_blank');
     }
 
-    // Convert to highest quality JPG for images
-    if (filename.includes('.jpg') || filename.includes('.png') || filename.includes('.webp')) {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-
-      img.onload = function() {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = img.naturalWidth || img.width;
-        canvas.height = img.naturalHeight || img.height;
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0);
-        canvas.toBlob(function(blob) {
-          if (blob) {
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = filename.replace(/\.(png|webp|jpg|jpeg)$/i, '.jpg');
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(a.href);
-          } else {
-            window.open(url, '_blank');
-          }
-        }, 'image/jpeg', 1.0);
-      };
-
-      img.onerror = function() {
-        fetch(url)
-          .then(r => r.ok ? r.blob() : Promise.reject())
-          .then(blob => {
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            URL.revokeObjectURL(a.href);
-          })
-          .catch(() => window.open(url, '_blank'));
-      };
-
-      img.src = url;
-      return;
-    }
-
-    // For videos, use original download method
     fetch(url)
       .then(r => r.ok ? r.blob() : Promise.reject())
       .then(blob => {
@@ -176,7 +130,7 @@
   }
 
   // --- Buttons ---
-  function addButtons(el, url, filename, adaptive = false) {
+  function addButtons(el, url, baseName, adaptive = false) {
     if (!el || el.nextSibling?.classList?.contains('xiv-btn-container')) return;
     const parent = el.parentElement;
     if (!parent) return;
@@ -188,13 +142,15 @@
     const container = document.createElement('div');
     container.className = 'xiv-btn-container';
 
-    // Reposition for profile photos (bottom-center inside circle)
     if (/\/profile_images\//.test(url)) {
       container.style.top = 'auto';
       container.style.bottom = '12px';
       container.style.right = '50%';
       container.style.transform = 'translateX(50%)';
     }
+
+    const ext = getExtension(url, adaptive);
+    const finalFilename = `${baseName}-${genRandom()}${ext}`;
 
     const openBtn = document.createElement('div');
     openBtn.className = 'xiv-tw-btn';
@@ -211,12 +167,11 @@
     dlBtn.title = adaptive ? 'Adaptive: open manifest' : 'Download';
     dlBtn.onmousedown = e => {
       e.stopPropagation(); e.preventDefault();
-      downloadMedia(url, filename, adaptive);
+      downloadMedia(url, finalFilename, adaptive);
     };
 
     container.appendChild(openBtn);
     container.appendChild(dlBtn);
-
     parent.appendChild(container);
   }
 
@@ -226,15 +181,12 @@
       if (!isLargeEnough(el)) return;
       if (el.tagName === 'IMG') {
         const url = forceLargeUrl(el.src);
-        const resolution = getResolution(el);
-        const ext = url.includes('.png') ? 'png' : url.includes('.webp') ? 'webp' : 'jpg';
-        addButtons(el, url, `x-img-${resolution}-${genRandom()}.${ext}`);
+        addButtons(el, url, 'x-img');
       } else if (el.tagName === 'VIDEO') {
         const vurl = getBestVideoUrl(el);
         if (!vurl) return;
-        const resolution = getResolution(el);
         const adaptive = isAdaptive(vurl);
-        addButtons(el, vurl, adaptive ? `x-vid-${resolution}-${genRandom()}.m3u8` : `x-vid-${resolution}-${genRandom()}.mp4`, adaptive);
+        addButtons(el, vurl, 'x-vid', adaptive);
       }
     });
   }
@@ -245,15 +197,12 @@
       if (!isLargeEnough(el)) return;
       if (el.tagName === 'IMG') {
         const url = forceLargeUrl(el.src);
-        const resolution = getResolution(el);
-        const ext = url.includes('.png') ? 'png' : url.includes('.webp') ? 'webp' : 'jpg';
-        addButtons(el, url, `x-img-${resolution}-${genRandom()}.${ext}`);
+        addButtons(el, url, 'x-img');
       } else if (el.tagName === 'VIDEO') {
         const vurl = getBestVideoUrl(el);
         if (!vurl) return;
-        const resolution = getResolution(el);
         const adaptive = isAdaptive(vurl);
-        addButtons(el, vurl, adaptive ? `x-vid-${resolution}-${genRandom()}.m3u8` : `x-vid-${resolution}-${genRandom()}.mp4`, adaptive);
+        addButtons(el, vurl, 'x-vid', adaptive);
       }
     });
   }
