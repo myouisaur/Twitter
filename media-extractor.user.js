@@ -2,7 +2,7 @@
 // @name         [Twitter/X] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      2.2
+// @version      2.3
 // @description  Adds open + download buttons to Twitter/X images/videos with clean filenames and original extensions preserved.
 // @author       Xiv
 // @match        *://*.twitter.com/*
@@ -28,6 +28,7 @@
       pointer-events: none;
       transition: opacity 0.15s ease;
     }
+    /* Show buttons when hovering the media OR the container itself */
     img:hover + .xiv-btn-container,
     video:hover + .xiv-btn-container,
     .xiv-btn-container:hover {
@@ -64,13 +65,15 @@
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   }
+
   function isLargeEnough(el) {
     const w = el.naturalWidth || el.videoWidth || el.offsetWidth || 0;
     const h = el.naturalHeight || el.videoHeight || el.offsetHeight || 0;
     return w >= 200 && h >= 200;
   }
+
   function forceLargeUrl(url) {
-    if (!url.includes('twimg.com')) return url;
+    if (!url || !url.includes('twimg.com')) return url;
 
     if (/\/profile_banners\//.test(url)) {
       let clean = url.split('?')[0];
@@ -85,14 +88,20 @@
       baseUrl = baseUrl.replace(/:(small|medium|large|thumb)$/, '');
       return baseUrl + '?format=jpg&name=orig';
     }
-    const u = new URL(url);
-    u.searchParams.set('name', 'orig');
-    u.searchParams.set('format', 'jpg');
-    return u.toString();
+    try {
+      const u = new URL(url);
+      u.searchParams.set('name', 'orig');
+      u.searchParams.set('format', 'jpg');
+      return u.toString();
+    } catch (e) {
+      return url;
+    }
   }
+
   function isAdaptive(url) {
-    return url.includes('.m3u8') || url.includes('.mpd');
+    return url && (url.includes('.m3u8') || url.includes('.mpd'));
   }
+
   function getBestVideoUrl(video) {
     const srcs = [...video.querySelectorAll('source')].map(s => s.src).filter(Boolean);
     if (srcs.length) {
@@ -101,13 +110,14 @@
     }
     return video.currentSrc || video.src || '';
   }
+
   function getExtension(url, adaptive) {
     if (adaptive) return url.endsWith('.m3u8') ? '.m3u8' : '.mpd';
     const match = url.match(/\.([a-zA-Z0-9]+)(?:\?|$)/);
     return match ? `.${match[1].toLowerCase()}` : '.jpg';
   }
 
-  // --- Download ---
+  // --- Download Logic ---
   function downloadMedia(url, filename, adaptive = false) {
     if (!url) return;
     if (adaptive) {
@@ -129,12 +139,14 @@
       .catch(() => window.open(url, '_blank'));
   }
 
-  // --- Buttons ---
+  // --- Button Injection ---
   function addButtons(el, url, baseName, adaptive = false) {
-    if (!el || el.nextSibling?.classList?.contains('xiv-btn-container')) return;
-    const parent = el.parentElement;
-    if (!parent) return;
+    if (!el || !el.parentElement) return;
 
+    // Check if buttons already exist (prevents duplicates)
+    if (el.nextSibling?.classList?.contains('xiv-btn-container')) return;
+
+    const parent = el.parentElement;
     if (!/relative|absolute|fixed|sticky/i.test(getComputedStyle(parent).position)) {
       parent.style.position = 'relative';
     }
@@ -142,6 +154,7 @@
     const container = document.createElement('div');
     container.className = 'xiv-btn-container';
 
+    // Position adjustment for profile images
     if (/\/profile_images\//.test(url)) {
       container.style.top = 'auto';
       container.style.bottom = '12px';
@@ -172,62 +185,62 @@
 
     container.appendChild(openBtn);
     container.appendChild(dlBtn);
-    parent.appendChild(container);
+
+    // Insert AFTER the media element
+    parent.insertBefore(container, el.nextSibling);
   }
 
-  // --- Feed ---
-  function injectFeed() {
-    document.querySelectorAll('article img[src*="twimg.com"], article video').forEach(el => {
+  // --- Core Processing Logic ---
+  
+  // Processes a specific DOM element (and its children) to find media
+  function processScope(scope) {
+    if (!scope || !scope.querySelectorAll) return;
+
+    // Define the selector for relevant media
+    // We look in 'article' (feed) and 'div[role="dialog"]' (modals/lightboxes)
+    const selectors = [
+      'article img[src*="twimg.com"]',
+      'article video',
+      'div[role="dialog"] img[src*="twimg.com"]',
+      'div[role="dialog"] video'
+    ].join(',');
+
+    const candidates = scope.querySelectorAll(selectors);
+    
+    candidates.forEach(el => {
       if (!isLargeEnough(el)) return;
+
       if (el.tagName === 'IMG') {
         const url = forceLargeUrl(el.src);
         addButtons(el, url, 'x-img');
       } else if (el.tagName === 'VIDEO') {
+        // Videos sometimes load the source a bit later, so we check lightly
         const vurl = getBestVideoUrl(el);
-        if (!vurl) return;
-        const adaptive = isAdaptive(vurl);
-        addButtons(el, vurl, 'x-vid', adaptive);
+        if (vurl) {
+          const adaptive = isAdaptive(vurl);
+          addButtons(el, vurl, 'x-vid', adaptive);
+        }
       }
     });
   }
 
-  // --- Modal ---
-  function injectModal() {
-    document.querySelectorAll('div[role="dialog"] img[src*="twimg.com"], div[role="dialog"] video').forEach(el => {
-      if (!isLargeEnough(el)) return;
-      if (el.tagName === 'IMG') {
-        const url = forceLargeUrl(el.src);
-        addButtons(el, url, 'x-img');
-      } else if (el.tagName === 'VIDEO') {
-        const vurl = getBestVideoUrl(el);
-        if (!vurl) return;
-        const adaptive = isAdaptive(vurl);
-        addButtons(el, vurl, 'x-vid', adaptive);
+  // --- Optimized Observer ---
+  const observer = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (node.nodeType === 1) { // 1 = Element Node
+          // Process the new node itself if it matches
+          processScope(node); 
+        }
       }
-    });
-  }
-
-  // --- Modal polling ---
-  let modalInterval = null;
-  function startModalPolling() {
-    if (modalInterval) clearInterval(modalInterval);
-    modalInterval = setInterval(() => {
-      if (document.querySelector('div[role="dialog"]')) {
-        injectModal();
-      } else {
-        clearInterval(modalInterval);
-        modalInterval = null;
-      }
-    }, 120);
-  }
-
-  // --- Observe ---
-  injectFeed();
-  const observer = new MutationObserver(() => {
-    injectFeed();
-    if (document.querySelector('div[role="dialog"]')) startModalPolling();
+    }
   });
+
+  // Start observing
+  // specific observation config to catch all additions deep in the tree
   observer.observe(document.body, { childList: true, subtree: true });
-  window.addEventListener('load', injectFeed);
+
+  // Initial run to catch anything already loaded
+  processScope(document.body);
 
 })();
