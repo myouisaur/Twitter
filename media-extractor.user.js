@@ -2,7 +2,7 @@
 // @name         [Twitter/X] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      2.3
+// @version      2.4
 // @description  Adds open + download buttons to Twitter/X images/videos with clean filenames and original extensions preserved.
 // @author       Xiv
 // @match        *://*.twitter.com/*
@@ -23,224 +23,113 @@
       right: 8px;
       display: flex !important;
       gap: 4px;
-      z-index: 9999 !important;
+      z-index: 50 !important; 
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.15s ease;
     }
-    /* Show buttons when hovering the media OR the container itself */
-    img:hover + .xiv-btn-container,
-    video:hover + .xiv-btn-container,
+    /* Ensure visibility when hovering the parent container */
+    div:hover > .xiv-btn-container,
     .xiv-btn-container:hover {
       opacity: 1 !important;
       pointer-events: auto !important;
     }
     .xiv-tw-btn {
-      width: 36px;
-      height: 36px;
-      background: rgba(0,0,0,0.4);
-      backdrop-filter: blur(6px);
-      color: white;
-      border-radius: 10px;
+      width: 34px;
+      height: 34px;
+      background: rgba(0,0,0,0.6) !important;
+      backdrop-filter: blur(4px);
+      color: white !important;
+      border-radius: 8px;
       cursor: pointer;
-      border: 1px solid rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
       display: flex !important;
       align-items: center;
       justify-content: center;
-      font-size: 15px;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.2);
-      transition: transform 0.12s ease, opacity 0.12s ease;
+      font-size: 14px;
+      transition: transform 0.1s ease;
     }
-    .xiv-tw-btn:hover {
-      transform: scale(1.05);
-    }
-    .xiv-tw-btn:active {
-      transform: scale(0.95);
-      opacity: 0.9;
-    }
+    .xiv-tw-btn:hover { transform: scale(1.1); background: rgba(0,0,0,0.8) !important; }
   `);
 
-  // --- Helpers ---
-  function genRandom(len = 15) {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-  }
-
-  function isLargeEnough(el) {
-    const w = el.naturalWidth || el.videoWidth || el.offsetWidth || 0;
-    const h = el.naturalHeight || el.videoHeight || el.offsetHeight || 0;
-    return w >= 200 && h >= 200;
-  }
+  // --- Helper Functions ---
+  const genRandom = (len = 8) => Math.random().toString(36).substring(2, 2 + len);
 
   function forceLargeUrl(url) {
     if (!url || !url.includes('twimg.com')) return url;
-
-    if (/\/profile_banners\//.test(url)) {
-      let clean = url.split('?')[0];
-      clean = clean.replace(/\/\d+x\d+$/, '/1500x500');
-      return clean;
-    }
-    if (/\/profile_images\//.test(url)) {
-      return url.split('?')[0];
-    }
     if (/\/media\//.test(url)) {
-      let baseUrl = url.split('?')[0];
-      baseUrl = baseUrl.replace(/:(small|medium|large|thumb)$/, '');
-      return baseUrl + '?format=jpg&name=orig';
+      const baseUrl = url.split('?')[0];
+      return `${baseUrl}?format=jpg&name=orig`;
     }
-    try {
-      const u = new URL(url);
-      u.searchParams.set('name', 'orig');
-      u.searchParams.set('format', 'jpg');
-      return u.toString();
-    } catch (e) {
-      return url;
-    }
-  }
-
-  function isAdaptive(url) {
-    return url && (url.includes('.m3u8') || url.includes('.mpd'));
+    return url.split('&name=')[0] + '&name=orig';
   }
 
   function getBestVideoUrl(video) {
-    const srcs = [...video.querySelectorAll('source')].map(s => s.src).filter(Boolean);
-    if (srcs.length) {
-      const direct = srcs.find(s => !isAdaptive(s));
-      return direct || srcs[0];
-    }
-    return video.currentSrc || video.src || '';
+    const direct = [...video.querySelectorAll('source')].find(s => !s.src.includes('.m3u8'));
+    return direct ? direct.src : (video.currentSrc || video.src);
   }
 
-  function getExtension(url, adaptive) {
-    if (adaptive) return url.endsWith('.m3u8') ? '.m3u8' : '.mpd';
-    const match = url.match(/\.([a-zA-Z0-9]+)(?:\?|$)/);
-    return match ? `.${match[1].toLowerCase()}` : '.jpg';
-  }
+  // --- Injection Logic ---
+  function injectButtons(el) {
+    if (!el || el.dataset.xivProcessed) return;
+    
+    // Find the closest relative-positioned container to anchor buttons
+    const container = el.closest('div[data-testid="tweetPhoto"], div[data-testid="videoPlayer"], .css-175oi2r');
+    if (!container || container.querySelector('.xiv-btn-container')) return;
 
-  // --- Download Logic ---
-  function downloadMedia(url, filename, adaptive = false) {
-    if (!url) return;
-    if (adaptive) {
-      alert('⚠ Adaptive stream. Manifest opened for external tools (yt-dlp / VLC / ffmpeg).');
-      return window.open(url, '_blank');
-    }
+    el.dataset.xivProcessed = "true";
+    const isVideo = el.tagName === 'VIDEO';
+    const mediaUrl = isVideo ? getBestVideoUrl(el) : forceLargeUrl(el.src);
+    if (!mediaUrl) return;
 
-    fetch(url)
-      .then(r => r.ok ? r.blob() : Promise.reject())
-      .then(blob => {
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(a.href);
-      })
-      .catch(() => window.open(url, '_blank'));
-  }
+    const btnWrapper = document.createElement('div');
+    btnWrapper.className = 'xiv-btn-container';
 
-  // --- Button Injection ---
-  function addButtons(el, url, baseName, adaptive = false) {
-    if (!el || !el.parentElement) return;
-
-    // Check if buttons already exist (prevents duplicates)
-    if (el.nextSibling?.classList?.contains('xiv-btn-container')) return;
-
-    const parent = el.parentElement;
-    if (!/relative|absolute|fixed|sticky/i.test(getComputedStyle(parent).position)) {
-      parent.style.position = 'relative';
-    }
-
-    const container = document.createElement('div');
-    container.className = 'xiv-btn-container';
-
-    // Position adjustment for profile images
-    if (/\/profile_images\//.test(url)) {
-      container.style.top = 'auto';
-      container.style.bottom = '12px';
-      container.style.right = '50%';
-      container.style.transform = 'translateX(50%)';
-    }
-
-    const ext = getExtension(url, adaptive);
-    const finalFilename = `${baseName}-${genRandom()}${ext}`;
-
+    // Link Button
     const openBtn = document.createElement('div');
     openBtn.className = 'xiv-tw-btn';
-    openBtn.textContent = '🔗';
-    openBtn.title = 'Open original';
-    openBtn.onmousedown = e => {
-      e.stopPropagation(); e.preventDefault();
-      window.open(url, '_blank');
-    };
+    openBtn.innerHTML = '🔗';
+    openBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); window.open(mediaUrl, '_blank'); };
 
+    // Download Button
     const dlBtn = document.createElement('div');
     dlBtn.className = 'xiv-tw-btn';
-    dlBtn.textContent = adaptive ? '⚠' : '⬇';
-    dlBtn.title = adaptive ? 'Adaptive: open manifest' : 'Download';
-    dlBtn.onmousedown = e => {
-      e.stopPropagation(); e.preventDefault();
-      downloadMedia(url, finalFilename, adaptive);
+    dlBtn.innerHTML = '⬇';
+    dlBtn.onclick = (e) => {
+        e.preventDefault(); e.stopPropagation();
+        fetch(mediaUrl).then(r => r.blob()).then(blob => {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `x-${isVideo ? 'video' : 'image'}-${genRandom()}.jpg`;
+            a.click();
+        }).catch(() => window.open(mediaUrl, '_blank'));
     };
 
-    container.appendChild(openBtn);
-    container.appendChild(dlBtn);
-
-    // Insert AFTER the media element
-    parent.insertBefore(container, el.nextSibling);
+    btnWrapper.appendChild(openBtn);
+    btnWrapper.appendChild(dlBtn);
+    container.style.position = 'relative';
+    container.appendChild(btnWrapper);
   }
 
-  // --- Core Processing Logic ---
-  
-  // Processes a specific DOM element (and its children) to find media
-  function processScope(scope) {
-    if (!scope || !scope.querySelectorAll) return;
-
-    // Define the selector for relevant media
-    // We look in 'article' (feed) and 'div[role="dialog"]' (modals/lightboxes)
-    const selectors = [
-      'article img[src*="twimg.com"]',
-      'article video',
-      'div[role="dialog"] img[src*="twimg.com"]',
-      'div[role="dialog"] video'
-    ].join(',');
-
-    const candidates = scope.querySelectorAll(selectors);
-    
-    candidates.forEach(el => {
-      if (!isLargeEnough(el)) return;
-
-      if (el.tagName === 'IMG') {
-        const url = forceLargeUrl(el.src);
-        addButtons(el, url, 'x-img');
-      } else if (el.tagName === 'VIDEO') {
-        // Videos sometimes load the source a bit later, so we check lightly
-        const vurl = getBestVideoUrl(el);
-        if (vurl) {
-          const adaptive = isAdaptive(vurl);
-          addButtons(el, vurl, 'x-vid', adaptive);
-        }
-      }
+  // --- Efficient Scanners ---
+  function scan() {
+    // Specifically target images in tweets and videos
+    const media = document.querySelectorAll('article img[src*="twimg.com"]:not([data-xivProcessed]), div[role="dialog"] img[src*="twimg.com"]:not([data-xivProcessed]), video:not([data-xivProcessed])');
+    media.forEach(m => {
+        // Filter out small icons/avatars
+        if (m.tagName === 'IMG' && (m.width < 150 || m.height < 150)) return;
+        injectButtons(m);
     });
   }
 
-  // --- Optimized Observer ---
-  const observer = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      for (const node of mutation.addedNodes) {
-        if (node.nodeType === 1) { // 1 = Element Node
-          // Process the new node itself if it matches
-          processScope(node); 
-        }
-      }
-    }
-  });
-
-  // Start observing
-  // specific observation config to catch all additions deep in the tree
+  // 1. Mutation Observer for new content
+  const observer = new MutationObserver(() => scan());
   observer.observe(document.body, { childList: true, subtree: true });
 
-  // Initial run to catch anything already loaded
-  processScope(document.body);
+  // 2. Periodic check (Safety net for slow-loading media)
+  setInterval(scan, 1500);
+
+  // 3. Initial run
+  scan();
 
 })();
