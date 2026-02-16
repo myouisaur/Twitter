@@ -2,7 +2,7 @@
 // @name         [Twitter/X] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      2.4
+// @version      2.2
 // @description  Adds open + download buttons to Twitter/X images/videos with clean filenames and original extensions preserved.
 // @author       Xiv
 // @match        *://*.twitter.com/*
@@ -23,113 +23,211 @@
       right: 8px;
       display: flex !important;
       gap: 4px;
-      z-index: 50 !important; 
+      z-index: 9999 !important;
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.15s ease;
     }
-    /* Ensure visibility when hovering the parent container */
-    div:hover > .xiv-btn-container,
+    img:hover + .xiv-btn-container,
+    video:hover + .xiv-btn-container,
     .xiv-btn-container:hover {
       opacity: 1 !important;
       pointer-events: auto !important;
     }
     .xiv-tw-btn {
-      width: 34px;
-      height: 34px;
-      background: rgba(0,0,0,0.6) !important;
-      backdrop-filter: blur(4px);
-      color: white !important;
-      border-radius: 8px;
+      width: 36px;
+      height: 36px;
+      background: rgba(0,0,0,0.4);
+      backdrop-filter: blur(6px);
+      color: white;
+      border-radius: 10px;
       cursor: pointer;
-      border: 1px solid rgba(255,255,255,0.2);
+      border: 1px solid rgba(255,255,255,0.1);
       display: flex !important;
       align-items: center;
       justify-content: center;
-      font-size: 14px;
-      transition: transform 0.1s ease;
+      font-size: 15px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.2);
+      transition: transform 0.12s ease, opacity 0.12s ease;
     }
-    .xiv-tw-btn:hover { transform: scale(1.1); background: rgba(0,0,0,0.8) !important; }
+    .xiv-tw-btn:hover {
+      transform: scale(1.05);
+    }
+    .xiv-tw-btn:active {
+      transform: scale(0.95);
+      opacity: 0.9;
+    }
   `);
 
-  // --- Helper Functions ---
-  const genRandom = (len = 8) => Math.random().toString(36).substring(2, 2 + len);
-
+  // --- Helpers ---
+  function genRandom(len = 15) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    return Array.from({ length: len }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  }
+  function isLargeEnough(el) {
+    const w = el.naturalWidth || el.videoWidth || el.offsetWidth || 0;
+    const h = el.naturalHeight || el.videoHeight || el.offsetHeight || 0;
+    return w >= 200 && h >= 200;
+  }
   function forceLargeUrl(url) {
-    if (!url || !url.includes('twimg.com')) return url;
-    if (/\/media\//.test(url)) {
-      const baseUrl = url.split('?')[0];
-      return `${baseUrl}?format=jpg&name=orig`;
+    if (!url.includes('twimg.com')) return url;
+
+    if (/\/profile_banners\//.test(url)) {
+      let clean = url.split('?')[0];
+      clean = clean.replace(/\/\d+x\d+$/, '/1500x500');
+      return clean;
     }
-    return url.split('&name=')[0] + '&name=orig';
+    if (/\/profile_images\//.test(url)) {
+      return url.split('?')[0];
+    }
+    if (/\/media\//.test(url)) {
+      let baseUrl = url.split('?')[0];
+      baseUrl = baseUrl.replace(/:(small|medium|large|thumb)$/, '');
+      return baseUrl + '?format=jpg&name=orig';
+    }
+    const u = new URL(url);
+    u.searchParams.set('name', 'orig');
+    u.searchParams.set('format', 'jpg');
+    return u.toString();
   }
-
+  function isAdaptive(url) {
+    return url.includes('.m3u8') || url.includes('.mpd');
+  }
   function getBestVideoUrl(video) {
-    const direct = [...video.querySelectorAll('source')].find(s => !s.src.includes('.m3u8'));
-    return direct ? direct.src : (video.currentSrc || video.src);
+    const srcs = [...video.querySelectorAll('source')].map(s => s.src).filter(Boolean);
+    if (srcs.length) {
+      const direct = srcs.find(s => !isAdaptive(s));
+      return direct || srcs[0];
+    }
+    return video.currentSrc || video.src || '';
+  }
+  function getExtension(url, adaptive) {
+    if (adaptive) return url.endsWith('.m3u8') ? '.m3u8' : '.mpd';
+    const match = url.match(/\.([a-zA-Z0-9]+)(?:\?|$)/);
+    return match ? `.${match[1].toLowerCase()}` : '.jpg';
   }
 
-  // --- Injection Logic ---
-  function injectButtons(el) {
-    if (!el || el.dataset.xivProcessed) return;
-    
-    // Find the closest relative-positioned container to anchor buttons
-    const container = el.closest('div[data-testid="tweetPhoto"], div[data-testid="videoPlayer"], .css-175oi2r');
-    if (!container || container.querySelector('.xiv-btn-container')) return;
+  // --- Download ---
+  function downloadMedia(url, filename, adaptive = false) {
+    if (!url) return;
+    if (adaptive) {
+      alert('⚠ Adaptive stream. Manifest opened for external tools (yt-dlp / VLC / ffmpeg).');
+      return window.open(url, '_blank');
+    }
 
-    el.dataset.xivProcessed = "true";
-    const isVideo = el.tagName === 'VIDEO';
-    const mediaUrl = isVideo ? getBestVideoUrl(el) : forceLargeUrl(el.src);
-    if (!mediaUrl) return;
+    fetch(url)
+      .then(r => r.ok ? r.blob() : Promise.reject())
+      .then(blob => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(a.href);
+      })
+      .catch(() => window.open(url, '_blank'));
+  }
 
-    const btnWrapper = document.createElement('div');
-    btnWrapper.className = 'xiv-btn-container';
+  // --- Buttons ---
+  function addButtons(el, url, baseName, adaptive = false) {
+    if (!el || el.nextSibling?.classList?.contains('xiv-btn-container')) return;
+    const parent = el.parentElement;
+    if (!parent) return;
 
-    // Link Button
+    if (!/relative|absolute|fixed|sticky/i.test(getComputedStyle(parent).position)) {
+      parent.style.position = 'relative';
+    }
+
+    const container = document.createElement('div');
+    container.className = 'xiv-btn-container';
+
+    if (/\/profile_images\//.test(url)) {
+      container.style.top = 'auto';
+      container.style.bottom = '12px';
+      container.style.right = '50%';
+      container.style.transform = 'translateX(50%)';
+    }
+
+    const ext = getExtension(url, adaptive);
+    const finalFilename = `${baseName}-${genRandom()}${ext}`;
+
     const openBtn = document.createElement('div');
     openBtn.className = 'xiv-tw-btn';
-    openBtn.innerHTML = '🔗';
-    openBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); window.open(mediaUrl, '_blank'); };
-
-    // Download Button
-    const dlBtn = document.createElement('div');
-    dlBtn.className = 'xiv-tw-btn';
-    dlBtn.innerHTML = '⬇';
-    dlBtn.onclick = (e) => {
-        e.preventDefault(); e.stopPropagation();
-        fetch(mediaUrl).then(r => r.blob()).then(blob => {
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = `x-${isVideo ? 'video' : 'image'}-${genRandom()}.jpg`;
-            a.click();
-        }).catch(() => window.open(mediaUrl, '_blank'));
+    openBtn.textContent = '🔗';
+    openBtn.title = 'Open original';
+    openBtn.onmousedown = e => {
+      e.stopPropagation(); e.preventDefault();
+      window.open(url, '_blank');
     };
 
-    btnWrapper.appendChild(openBtn);
-    btnWrapper.appendChild(dlBtn);
-    container.style.position = 'relative';
-    container.appendChild(btnWrapper);
+    const dlBtn = document.createElement('div');
+    dlBtn.className = 'xiv-tw-btn';
+    dlBtn.textContent = adaptive ? '⚠' : '⬇';
+    dlBtn.title = adaptive ? 'Adaptive: open manifest' : 'Download';
+    dlBtn.onmousedown = e => {
+      e.stopPropagation(); e.preventDefault();
+      downloadMedia(url, finalFilename, adaptive);
+    };
+
+    container.appendChild(openBtn);
+    container.appendChild(dlBtn);
+    parent.appendChild(container);
   }
 
-  // --- Efficient Scanners ---
-  function scan() {
-    // Specifically target images in tweets and videos
-    const media = document.querySelectorAll('article img[src*="twimg.com"]:not([data-xivProcessed]), div[role="dialog"] img[src*="twimg.com"]:not([data-xivProcessed]), video:not([data-xivProcessed])');
-    media.forEach(m => {
-        // Filter out small icons/avatars
-        if (m.tagName === 'IMG' && (m.width < 150 || m.height < 150)) return;
-        injectButtons(m);
+  // --- Feed ---
+  function injectFeed() {
+    document.querySelectorAll('article img[src*="twimg.com"], article video').forEach(el => {
+      if (!isLargeEnough(el)) return;
+      if (el.tagName === 'IMG') {
+        const url = forceLargeUrl(el.src);
+        addButtons(el, url, 'x-img');
+      } else if (el.tagName === 'VIDEO') {
+        const vurl = getBestVideoUrl(el);
+        if (!vurl) return;
+        const adaptive = isAdaptive(vurl);
+        addButtons(el, vurl, 'x-vid', adaptive);
+      }
     });
   }
 
-  // 1. Mutation Observer for new content
-  const observer = new MutationObserver(() => scan());
+  // --- Modal ---
+  function injectModal() {
+    document.querySelectorAll('div[role="dialog"] img[src*="twimg.com"], div[role="dialog"] video').forEach(el => {
+      if (!isLargeEnough(el)) return;
+      if (el.tagName === 'IMG') {
+        const url = forceLargeUrl(el.src);
+        addButtons(el, url, 'x-img');
+      } else if (el.tagName === 'VIDEO') {
+        const vurl = getBestVideoUrl(el);
+        if (!vurl) return;
+        const adaptive = isAdaptive(vurl);
+        addButtons(el, vurl, 'x-vid', adaptive);
+      }
+    });
+  }
+
+  // --- Modal polling ---
+  let modalInterval = null;
+  function startModalPolling() {
+    if (modalInterval) clearInterval(modalInterval);
+    modalInterval = setInterval(() => {
+      if (document.querySelector('div[role="dialog"]')) {
+        injectModal();
+      } else {
+        clearInterval(modalInterval);
+        modalInterval = null;
+      }
+    }, 120);
+  }
+
+  // --- Observe ---
+  injectFeed();
+  const observer = new MutationObserver(() => {
+    injectFeed();
+    if (document.querySelector('div[role="dialog"]')) startModalPolling();
+  });
   observer.observe(document.body, { childList: true, subtree: true });
-
-  // 2. Periodic check (Safety net for slow-loading media)
-  setInterval(scan, 1500);
-
-  // 3. Initial run
-  scan();
+  window.addEventListener('load', injectFeed);
 
 })();
