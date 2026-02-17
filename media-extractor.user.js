@@ -2,7 +2,7 @@
 // @name         [Twitter/X] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      5.4
+// @version      5.5
 // @description  Adds open + download buttons to Twitter/X images/videos with clean filenames and original extensions preserved.
 // @author       Xiv
 // @match        *://*.twitter.com/*
@@ -119,6 +119,10 @@
 
       user-select: none;
       transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .xiv-tw-btn svg {
+      pointer-events: none;
     }
 
     .xiv-tw-btn::before {
@@ -249,11 +253,21 @@
       .catch(() => window.open(url, '_blank'));
   }
 
+  // Icons
+  const icons = {
+    open: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19 19H5V5h7V3H5a2 2 0 00-2 2v14a2 2 0 002 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></svg>',
+    download: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>',
+    play: '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>'
+  };
+
   // ==========================================================================
   // MODULE 4: BUTTON INJECTION
   // ==========================================================================
 
   function injectImageButtons(img) {
+    // Exclude emojis explicitly
+    if (img.src.includes('/emoji/')) return;
+
     if (img.nextSibling && img.nextSibling.classList && img.nextSibling.classList.contains('xiv-btn-container')) return;
     if (!isLargeEnough(img)) return;
 
@@ -274,13 +288,13 @@
 
     const openBtn = document.createElement('div');
     openBtn.className = 'xiv-tw-btn';
-    openBtn.innerHTML = '🖼️';
+    openBtn.innerHTML = icons.open;
     openBtn.title = 'Open Image';
     openBtn.onmousedown = e => { e.stopPropagation(); e.preventDefault(); window.open(finalUrl, '_blank'); };
 
     const dlBtn = document.createElement('div');
     dlBtn.className = 'xiv-tw-btn';
-    dlBtn.innerHTML = '⬇️';
+    dlBtn.innerHTML = icons.download;
     dlBtn.title = 'Download Image';
     dlBtn.onmousedown = e => { e.stopPropagation(); e.preventDefault(); downloadMedia(finalUrl, filename); };
 
@@ -306,7 +320,7 @@
 
     const openBtn = document.createElement('div');
     openBtn.className = 'xiv-tw-btn';
-    openBtn.innerHTML = '▶️';
+    openBtn.innerHTML = icons.play; // Used play icon for opening video in new tab
     openBtn.title = 'Open Video (New Tab)';
     openBtn.onmousedown = e => {
       e.stopPropagation(); e.preventDefault();
@@ -317,7 +331,7 @@
 
     const dlBtn = document.createElement('div');
     dlBtn.className = 'xiv-tw-btn';
-    dlBtn.innerHTML = '⬇️';
+    dlBtn.innerHTML = icons.download;
     dlBtn.title = 'Download MP4';
     dlBtn.onmousedown = e => {
       e.stopPropagation(); e.preventDefault();
@@ -332,6 +346,7 @@
   }
 
   function scan() {
+    // Only select images that match twimg.com but are NOT emojis (handled in injectImageButtons as well for safety)
     const imgs = document.querySelectorAll('img[src*="twimg.com"]');
     imgs.forEach(injectImageButtons);
 
