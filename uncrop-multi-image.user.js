@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         [Twitter] Uncrop Multi-Image Layouts
-// @namespace    https://github.com/myouisaur/Twitter
+// @namespace    https://github.com/myouisaur/X-Uncrop-Media
 // @icon         https://www.x.com/favicon.ico
-// @version      7.3
+// @version      7.6
 // @description  Uncrops multi-image posts on X (Twitter) to display them in their original aspect ratios.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -29,7 +29,7 @@
             HIDDEN_ORIGINAL: 'xiv-hidden-original'
         },
         OBSERVER_DELAY: 100,
-        MAX_HEIGHT_VH: 70
+        MAX_HEIGHT_VH: 65
     };
 
     const App = {
@@ -51,6 +51,7 @@
                 /* 1. THE SANDBOX GRID */
                 .xiv-custom-grid {
                     display: grid !important;
+                    width: 100% !important;
                     gap: 2px !important;
                     margin-top: 12px !important;
                     border-radius: clamp(8px, 1vw, 14px) !important;
@@ -106,6 +107,12 @@
                     display: none !important;
                 }
 
+                /* 6. QUOTE TWEET OVERRIDE: Prevent side-by-side squishing and fix DOM order */
+                .xiv-force-column {
+                    flex-direction: column-reverse !important;
+                    align-items: stretch !important;
+                }
+
                 @media (prefers-color-scheme: dark) {
                     .xiv-custom-grid { border-color: rgba(255, 255, 255, 0.1) !important; }
                     .xiv-grid-item { background-color: rgba(255, 255, 255, 0.03) !important; }
@@ -146,16 +153,13 @@
 
                 if (groupPhotos.length === 0) return;
 
-                // SPA Race Condition Fix: Verify every photo wrapper actually has an injected <img> with a src
                 const isReady = groupPhotos.every(p => {
                     const img = p.querySelector('img');
                     return img && img.src;
                 });
 
-                // If React hasn't injected the images yet, abort and wait for the observer to catch them later
                 if (!isReady) return;
 
-                // Safe to process now
                 groupPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
 
                 const mediaData = groupPhotos.map(p => {
@@ -208,6 +212,12 @@
 
                 mediaRoot.classList.add(CONFIG.CLASSES.HIDDEN_ORIGINAL);
                 if (mediaRoot.parentNode) {
+                    const isStatusPage = window.location.pathname.includes('/status/');
+
+                    if (!isStatusPage && mediaRoot.parentNode.classList.contains('r-18u37iz')) {
+                        mediaRoot.parentNode.classList.add('xiv-force-column');
+                    }
+
                     mediaRoot.parentNode.insertBefore(customGrid, mediaRoot.nextSibling);
                 }
             });
@@ -226,7 +236,6 @@
                     const addedNodes = mutations[i].addedNodes;
                     for (let j = 0; j < addedNodes.length; j++) {
                         const node = addedNodes[j];
-                        // Expanded to explicitly catch <img> tags being injected late by React
                         if (node.nodeType === 1 && (
                             node.tagName === 'ARTICLE' ||
                             node.tagName === 'IMG' ||
