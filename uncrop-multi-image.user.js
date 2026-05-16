@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/X-Uncrop-Media
 // @icon         https://www.x.com/favicon.ico
-// @version      7.6
+// @version      7.7
 // @description  Uncrops multi-image posts on X (Twitter) to display them in their original aspect ratios.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -29,7 +29,7 @@
             HIDDEN_ORIGINAL: 'xiv-hidden-original'
         },
         OBSERVER_DELAY: 100,
-        MAX_HEIGHT_VH: 65
+        MAX_HEIGHT_VH: 60
     };
 
     const App = {
