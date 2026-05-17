@@ -2,7 +2,7 @@
 // @name         [Twitter] Image Zoom on Hover
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      4.8
+// @version      4.11
 // @description  Advanced on-hover image zoom for a smoother browsing experience, with a robust and stylized toggle.
 // @author       Xiv
 // @match        *://*.twitter.com/*
@@ -24,7 +24,7 @@
     const CONFIG = {
         FALLBACK_COLOR: '#ffffff',
         CSS_VAR: '--tm-img-accent',
-        FADE_DURATION_MS: 200,
+        FADE_DURATION_MS: 250,
         HOVER_DELAY_MS: 120,
         HIDE_DELAY_MS: 100,
         STORAGE_KEY: 'tm-img-hover-enabled',
@@ -49,6 +49,7 @@
     let storedState = localStorage.getItem(CONFIG.STORAGE_KEY);
     let hoverEnabled = storedState === null ? true : (storedState === 'true');
     let currentImgUrl = null;
+    let showTimer = null;
     let hideTimer = null;
     let scrollEndTimer = null;
     let loadingCleanupTimer = null;
@@ -91,7 +92,6 @@
         };
     }
 
-    // Abstracted helper to prevent repetition
     function resolveMediaTarget(target) {
         if (!target) return null;
         if (target.tagName !== 'IMG' && target.tagName !== 'VIDEO') {
@@ -211,20 +211,34 @@
                 position: fixed; z-index: ${CONFIG.Z_INDEX}; top: 50%; left: 50%; pointer-events: none;
                 border: 3px solid var(${CONFIG.CSS_VAR}); background: #000;
                 box-shadow: 0 8px 40px rgba(0,0,0,0.5), 0 2px 10px rgba(0,0,0,0.3); border-radius: 8px; overflow: hidden;
-                visibility: hidden; opacity: 0; transform: translate(-50%, -50%) scale(0.96);
-                transition: opacity ${CONFIG.FADE_DURATION_MS}ms ease-out, transform ${CONFIG.FADE_DURATION_MS}ms cubic-bezier(0.2, 0.8, 0.2, 1);
+                visibility: hidden; opacity: 0; transform: translate(-50%, -50%) scale(0.94);
+                transition: opacity ${CONFIG.FADE_DURATION_MS}ms ease-out, transform ${CONFIG.FADE_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear ${CONFIG.FADE_DURATION_MS}ms;
             }
-            #tm-img-popup.tm-visible { visibility: visible; opacity: 1; transform: translate(-50%, -50%) scale(1); }
+
+            #tm-img-popup.tm-visible {
+                visibility: visible; opacity: 1; transform: translate(-50%, -50%) scale(1);
+                transition: opacity ${CONFIG.FADE_DURATION_MS}ms ease-out, transform ${CONFIG.FADE_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 0s;
+            }
 
             .tm-media-wrapper { display: grid; place-items: center; background: #000; position: relative; }
             .tm-thumb-blur, .tm-target-media { grid-area: 1 / 1; max-width: 95vw; max-height: 95vh; }
             .tm-thumb-blur { width: 100%; height: 100%; object-fit: cover; filter: blur(15px) brightness(0.7); transform: scale(1.05); transition: opacity 0.4s ease; z-index: 1; }
-            .tm-target-media { object-fit: contain; opacity: 0; transition: opacity 0.3s ease; z-index: 2; }
-            .tm-target-media.tm-loaded { opacity: 1; }
 
-            .tm-loading-bar { position: absolute; top: 0; left: 0; width: 100%; height: 4px; background: rgba(0, 0, 0, 0.5); z-index: 10; overflow: hidden; opacity: 1; transition: opacity 0.3s ease; }
-            .tm-loading-bar-indicator { position: absolute; top: 0; left: 0; height: 100%; width: 50%; background: linear-gradient(90deg, transparent, #ffffff, transparent); box-shadow: 0 0 10px var(${CONFIG.CSS_VAR}), 0 0 5px var(${CONFIG.CSS_VAR}); animation: tm-sweep 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
-            @keyframes tm-sweep { 0% { transform: translateX(-150%); } 100% { transform: translateX(250%); } }
+            .tm-target-media { object-fit: contain; opacity: 0; transform: scale(0.98); transition: opacity 0.3s ease, transform 0.4s cubic-bezier(0.22, 1, 0.36, 1); z-index: 2; }
+            .tm-target-media.tm-loaded { opacity: 1; transform: scale(1); }
+
+            .tm-loading-bar {
+                position: absolute; top: 0; left: 0; width: 100%; height: 6px;
+                background: rgba(0, 0, 0, 0.6); z-index: 10; opacity: 1;
+                transition: opacity 0.4s ease; overflow: hidden;
+            }
+            .tm-loading-bar-indicator {
+                position: absolute; top: 0; left: -50%; height: 100%; width: 50%;
+                background: linear-gradient(90deg, transparent, var(${CONFIG.CSS_VAR}) 40%, #ffffff 50%, var(${CONFIG.CSS_VAR}) 60%, transparent);
+                box-shadow: 0 0 14px var(${CONFIG.CSS_VAR}), 0 0 4px #ffffff;
+                animation: tm-sweep 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+            }
+            @keyframes tm-sweep { 0% { left: -50%; } 100% { left: 100%; } }
 
             .tm-fallback-notice { color: #fff; background: #d9534f; padding: 4px 8px; border-radius: 4px; font-size: 0.9em; margin-bottom: 8px; display: inline-block; font-family: sans-serif; position: relative; z-index: 3; margin: 16px; }
         `);
@@ -423,7 +437,7 @@
             loadingCleanupTimer = setTimeout(() => {
                 if (loader.parentNode) loader.parentNode.removeChild(loader);
                 if (thumb && thumb.parentNode) thumb.parentNode.removeChild(thumb);
-            }, 400);
+            }, 400); // Allow fade opacity to process before removing from DOM
         };
 
         if (isVideo) {
@@ -455,13 +469,18 @@
     }
 
     function hidePopup() {
+        if (showTimer) { clearTimeout(showTimer); showTimer = null; }
+        if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
         if (loadingCleanupTimer) { clearTimeout(loadingCleanupTimer); loadingCleanupTimer = null; }
+
         popupEl.classList.remove('tm-visible');
+
         setTimeout(() => {
             if (!popupEl.classList.contains('tm-visible')) {
                 popupEl.replaceChildren();
             }
-        }, CONFIG.FADE_DURATION_MS);
+        }, CONFIG.FADE_DURATION_MS + 20); // Safety buffer
+
         currentImgUrl = null;
     }
 
@@ -478,9 +497,12 @@
 
         debouncedUpdateThemeColor();
         currentImgUrl = fullImgUrl;
-        if (hideTimer) clearTimeout(hideTimer);
 
-        setTimeout(() => {
+        // Aggressively clear active timers to prevent double-firing
+        if (hideTimer) clearTimeout(hideTimer);
+        if (showTimer) clearTimeout(showTimer);
+
+        showTimer = setTimeout(() => {
             if (hoverEnabled && currentHoverTarget === target && !isDismissedUntilMove) {
                 showPopup(fullImgUrl, getFallbackUrl(target), target.tagName === 'VIDEO');
             }
@@ -517,6 +539,8 @@
     }
 
     function handleMouseOut(e) {
+        if (showTimer) { clearTimeout(showTimer); showTimer = null; } // Instantly abort pending show
+
         const target = resolveMediaTarget(e.target);
         if (target && shouldHandleImg(target)) {
             hideTimer = setTimeout(hidePopup, CONFIG.HIDE_DELAY_MS);
@@ -548,8 +572,8 @@
         }
     }
 
-    function handleWheel() {
-        if (currentImgUrl || isDismissedUntilMove) {
+    function handleScroll() {
+        if (currentImgUrl || isDismissedUntilMove || showTimer) {
             isDismissedUntilMove = true;
             hidePopup();
         }
@@ -570,7 +594,10 @@
         window.addEventListener('mousedown', hidePopup, true);
         window.addEventListener('keydown', handleKeyDown);
         window.addEventListener('keyup', handleKeyUp);
-        window.addEventListener('wheel', handleWheel, { passive: true });
+
+        // Listen to native scroll AND wheel, using capturing phase to catch nested scrolling containers
+        window.addEventListener('scroll', handleScroll, { passive: true, capture: true });
+        window.addEventListener('wheel', handleScroll, { passive: true, capture: true });
 
         // MutationObserver debounced to prevent thrashing
         const debouncedEnsureSidebar = debounce(() => {
