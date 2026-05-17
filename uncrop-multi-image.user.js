@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/X-Uncrop-Media
 // @icon         https://www.x.com/favicon.ico
-// @version      8.1
+// @version      8.8
 // @description  Uncrops multi-image posts on X (Twitter) by dynamically calculating perfect flex ratios to eliminate empty space.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -15,9 +15,10 @@
 (function () {
     'use strict';
 
-    // 1. DUPLICATE EXECUTION GUARD
+    // 1. DUPLICATE EXECUTION GUARD & CACHE INIT
     if (window.top !== window.self || window.__xivUncropInitialized) return;
     window.__xivUncropInitialized = true;
+    window.__xivAspectCache = new Map(); // Memory cache for layout blueprints
 
     // 2. CONFIGURATION
     const CONFIG = {
@@ -52,23 +53,42 @@
             style.id = CONFIG.CLASSES.STYLE_ID;
 
             style.textContent = `
-                /* 1. THE MATHEMATICAL GRID SYSTEM */
+                /* 1. ADVANCED ANIMATION STATES */
+                @keyframes xivShimmerPulse {
+                    0% { filter: blur(4px) grayscale(30%) brightness(1); opacity: 0.8; }
+                    50% { filter: blur(6px) grayscale(40%) brightness(0.9); opacity: 0.6; }
+                    100% { filter: blur(4px) grayscale(30%) brightness(1); opacity: 0.8; }
+                }
+
+                .xiv-processing {
+                    animation: xivShimmerPulse 1.2s infinite ease-in-out !important;
+                    pointer-events: none !important;
+                }
+
+                .xiv-math-grid.xiv-animating {
+                    /* Custom Apple-style spring physics */
+                    transition: height 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+                }
+
+                .xiv-grid-hidden .xiv-math-item {
+                    opacity: 0 !important;
+                    transform: translateY(16px) scale(0.98) !important;
+                }
+
+                /* 2. THE MATHEMATICAL GRID SYSTEM */
                 .xiv-math-grid {
                     width: 100% !important;
-
-                    /* Dynamic scaling: Shrink width to prevent exceeding MAX_HEIGHT_VH */
                     max-width: calc(${CONFIG.MAX_HEIGHT_VH}vh * var(--grid-aspect, 1)) !important;
                     max-height: ${CONFIG.MAX_HEIGHT_VH}vh !important;
                     aspect-ratio: var(--grid-aspect) !important;
-
                     margin-top: 12px !important;
-                    margin-left: auto !important; /* Centers the grid if scaled down */
+                    margin-left: auto !important;
                     margin-right: auto !important;
-
                     gap: 2px !important;
                     border-radius: clamp(8px, 1vw, 14px) !important;
                     overflow: hidden !important;
                     border: 1px solid rgba(128, 128, 128, 0.15) !important;
+                    transform-origin: center center !important;
                 }
 
                 .xiv-math-col {
@@ -85,22 +105,34 @@
                     min-height: 0 !important;
                 }
 
-                /* 2. ITEM WRAPPERS */
+                /* 3. ITEM WRAPPERS */
                 .xiv-math-item {
                     position: relative !important;
                     display: flex !important;
                     background-color: rgba(128, 128, 128, 0.05) !important;
-                    transition: opacity 0.2s ease !important;
                     cursor: pointer !important;
                     min-height: 0 !important;
                     min-width: 0 !important;
+                    overflow: hidden !important; /* Contains the image scaling */
+
+                    /* Staggered entrance transition */
+                    opacity: 1;
+                    transform: translateY(0) scale(1);
+                    transition: opacity 0.5s cubic-bezier(0.2, 0.8, 0.2, 1),
+                                transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+                    transition-delay: calc(var(--stagger-idx, 0) * 60ms) !important;
                 }
 
-                .xiv-math-item:hover {
+                .xiv-math-item:hover .xiv-custom-img {
                     opacity: 0.9 !important;
                 }
 
-                /* 3. IMAGES (Object-fit cover maps seamlessly inside mathematically precise flex-boxes) */
+                /* Disable staggered entrance on cached (instant) renders */
+                .xiv-math-grid:not(.xiv-animating) .xiv-math-item {
+                    transition: none !important;
+                }
+
+                /* 4. IMAGES (Depth-scaling effect) */
                 .xiv-custom-img {
                     position: absolute !important;
                     top: 0 !important;
@@ -110,19 +142,27 @@
                     object-fit: cover !important;
                     display: block !important;
                     opacity: 0;
-                    transition: opacity 0.3s ease-in;
+                    transform: scale(1.08) !important; /* Starts zoomed in */
+                    transition: opacity 0.4s ease-out,
+                                transform 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
                 }
 
                 .xiv-custom-img.xiv-loaded {
                     opacity: 1;
+                    transform: scale(1) !important; /* Smoothly zooms out to 1.0x */
                 }
 
-                /* 4. SAFELY HIDE NATIVE ENGINE */
+                /* Prevent zooming animation on instant cached renders */
+                .xiv-math-grid:not(.xiv-animating) .xiv-custom-img {
+                    transition: opacity 0.2s ease-out !important;
+                }
+
+                /* 5. SAFELY HIDE NATIVE ENGINE */
                 .${CONFIG.CLASSES.HIDDEN_ORIGINAL} {
                     display: none !important;
                 }
 
-                /* 5. QUOTE TWEET OVERRIDE */
+                /* 6. QUOTE TWEET OVERRIDE */
                 .xiv-force-column {
                     flex-direction: column-reverse !important;
                     align-items: stretch !important;
@@ -140,34 +180,50 @@
 
     // 5. MATH & LAYOUT ENGINE
     const MathEngine = {
-        async process(mediaData, mediaRoot) {
+        async process(mediaData, mediaRoot, cacheKey) {
             try {
-                // Pre-load intrinsic dimensions asynchronously
-                const dimensions = await Promise.all(mediaData.map(data => {
-                    return new Promise(resolve => {
-                        const img = new Image();
-                        img.onload = () => resolve({ ...data, aspect: img.naturalWidth / img.naturalHeight });
-                        img.onerror = () => resolve({ ...data, aspect: 1 }); // Fallback to square
-                        img.src = data.src;
-                    });
-                }));
+                const oldHeight = mediaRoot.offsetHeight;
+                const isCached = window.__xivAspectCache.has(cacheKey);
+                let aspects;
+
+                if (isCached) {
+                    // Instantly pull exact dimensions from memory cache
+                    aspects = window.__xivAspectCache.get(cacheKey);
+                } else {
+                    // Pre-load intrinsic dimensions asynchronously for new images
+                    const dimensions = await Promise.all(mediaData.map(data => {
+                        return new Promise(resolve => {
+                            const img = new Image();
+                            img.onload = () => resolve(img.naturalWidth / img.naturalHeight);
+                            img.onerror = () => resolve(1); // Fallback
+                            img.src = data.src;
+                        });
+                    }));
+                    aspects = dimensions;
+                    window.__xivAspectCache.set(cacheKey, aspects);
+                }
 
                 const grid = document.createElement('div');
                 grid.className = 'xiv-math-grid';
 
-                const aspects = dimensions.map(d => d.aspect);
-                const count = dimensions.length;
+                // Only apply animation locking if this is a fresh, uncached render
+                if (!isCached) {
+                    grid.classList.add('xiv-animating', 'xiv-grid-hidden');
+                    grid.style.height = `${oldHeight}px`;
+                }
+
+                const count = mediaData.length;
                 let finalAspect = 1;
 
                 // Component Builder
-                const createItem = (data, flexVal) => {
+                const createItem = (data, flexVal, index) => {
                     const wrapper = document.createElement('div');
                     wrapper.className = 'xiv-math-item';
                     wrapper.style.flex = `${flexVal} 1 0%`;
+                    wrapper.style.setProperty('--stagger-idx', index);
                     wrapper.setAttribute('role', 'button');
                     wrapper.setAttribute('tabindex', '0');
 
-                    // Upgrade to Large URL
                     let highResSrc = data.src;
                     try {
                         const url = new URL(data.src);
@@ -188,6 +244,7 @@
                     img.onload = () => img.classList.add('xiv-loaded');
 
                     wrapper.appendChild(img);
+
                     wrapper.addEventListener('click', (e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -201,14 +258,14 @@
                 if (count === 1) {
                     finalAspect = aspects[0];
                     grid.style.display = 'flex';
-                    grid.appendChild(createItem(dimensions[0], 1));
+                    grid.appendChild(createItem(mediaData[0], 1, 0));
                 }
                 else if (count === 2) {
                     finalAspect = aspects[0] + aspects[1];
                     grid.style.display = 'flex';
                     grid.style.flexDirection = 'row';
-                    grid.appendChild(createItem(dimensions[0], aspects[0]));
-                    grid.appendChild(createItem(dimensions[1], aspects[1]));
+                    grid.appendChild(createItem(mediaData[0], aspects[0], 0));
+                    grid.appendChild(createItem(mediaData[1], aspects[1], 1));
                 }
                 else if (count === 3) {
                     const rSum = (1 / aspects[1]) + (1 / aspects[2]);
@@ -216,14 +273,13 @@
                     grid.style.display = 'flex';
                     grid.style.flexDirection = 'row';
 
-                    // Left Column perfectly scales inverse to the height required by the stacked right column
-                    grid.appendChild(createItem(dimensions[0], aspects[0] * rSum));
+                    grid.appendChild(createItem(mediaData[0], aspects[0] * rSum, 0));
 
                     const rightCol = document.createElement('div');
                     rightCol.className = 'xiv-math-col';
                     rightCol.style.flex = '1 1 0%';
-                    rightCol.appendChild(createItem(dimensions[1], 1 / aspects[1]));
-                    rightCol.appendChild(createItem(dimensions[2], 1 / aspects[2]));
+                    rightCol.appendChild(createItem(mediaData[1], 1 / aspects[1], 1));
+                    rightCol.appendChild(createItem(mediaData[2], 1 / aspects[2], 2));
                     grid.appendChild(rightCol);
                 }
                 else if (count === 4) {
@@ -233,34 +289,50 @@
                     grid.style.display = 'flex';
                     grid.style.flexDirection = 'column';
 
-                    // Row weights perfectly distributed based on combined aspect ratios of enclosed items
                     const row1 = document.createElement('div');
                     row1.className = 'xiv-math-row';
                     row1.style.flex = `${1 / r1} 1 0%`;
-                    row1.appendChild(createItem(dimensions[0], aspects[0]));
-                    row1.appendChild(createItem(dimensions[1], aspects[1]));
+                    row1.appendChild(createItem(mediaData[0], aspects[0], 0));
+                    row1.appendChild(createItem(mediaData[1], aspects[1], 1));
 
                     const row2 = document.createElement('div');
                     row2.className = 'xiv-math-row';
                     row2.style.flex = `${1 / r2} 1 0%`;
-                    row2.appendChild(createItem(dimensions[2], aspects[2]));
-                    row2.appendChild(createItem(dimensions[3], aspects[3]));
+                    row2.appendChild(createItem(mediaData[2], aspects[2], 2));
+                    row2.appendChild(createItem(mediaData[3], aspects[3], 3));
 
                     grid.appendChild(row1);
                     grid.appendChild(row2);
                 }
 
-                // Pass the mathematical calculation into the CSS for responsive height-capping
                 grid.style.setProperty('--grid-aspect', finalAspect);
 
-                // Inject Custom UI and Disable Native
+                mediaRoot.classList.remove('xiv-processing');
                 mediaRoot.classList.add(CONFIG.CLASSES.HIDDEN_ORIGINAL);
+
                 if (mediaRoot.parentNode) {
                     const isStatusPage = window.location.pathname.includes('/status/');
                     if (!isStatusPage && mediaRoot.parentNode.classList.contains('r-18u37iz')) {
                         mediaRoot.parentNode.classList.add('xiv-force-column');
                     }
                     mediaRoot.parentNode.insertBefore(grid, mediaRoot.nextSibling);
+                }
+
+                // If cached, CSS naturally dictates height immediately.
+                // Only run animation transitions for new un-cached discoveries.
+                if (!isCached) {
+                    const viewportVh = window.innerHeight * (CONFIG.MAX_HEIGHT_VH / 100);
+                    const targetHeight = grid.offsetWidth > 0 ? Math.min(grid.offsetWidth / finalAspect, viewportVh) : oldHeight;
+
+                    requestAnimationFrame(() => {
+                        grid.classList.remove('xiv-grid-hidden');
+                        grid.style.height = `${targetHeight}px`;
+
+                        setTimeout(() => {
+                            grid.classList.remove('xiv-animating');
+                            grid.style.height = '';
+                        }, 600);
+                    });
                 }
 
             } catch (error) {
@@ -272,23 +344,19 @@
     // 6. DOM PROCESSING
     const DOMProcessor = {
         scan() {
-            const unprocessedPhotos = document.querySelectorAll(`${CONFIG.SELECTORS.PHOTO}:not(.${CONFIG.CLASSES.PROCESSED})`);
-            if (!unprocessedPhotos.length) return;
+            const unprocessedItems = document.querySelectorAll(`${CONFIG.SELECTORS.PHOTO}:not(.${CONFIG.CLASSES.PROCESSED})`);
+            const roots = new Set();
 
-            unprocessedPhotos.forEach(photo => {
-                if (photo.classList.contains(CONFIG.CLASSES.PROCESSED)) return;
-
-                // Failsafe 1: Global Article Scope Check
-                const article = photo.closest('article');
-                if (article && article.querySelector(CONFIG.SELECTORS.VIDEO_OR_GIF)) {
-                    photo.classList.add(CONFIG.CLASSES.PROCESSED);
+            unprocessedItems.forEach(item => {
+                if (item.classList.contains(CONFIG.CLASSES.PROCESSED)) return;
+                if (item.closest('.xiv-math-grid') || item.closest(`.${CONFIG.CLASSES.HIDDEN_ORIGINAL}`)) {
+                    item.classList.add(CONFIG.CLASSES.PROCESSED);
                     return;
                 }
 
-                let current = photo.parentElement;
-                let mediaRoot = photo;
+                let current = item.parentElement;
+                let mediaRoot = item;
 
-                // Structural container search
                 while (current && current.tagName !== 'ARTICLE') {
                     if (current.querySelector('[data-testid="tweetText"]') ||
                         current.querySelector('[data-testid="User-Name"]') ||
@@ -298,50 +366,56 @@
                     mediaRoot = current;
                     current = current.parentElement;
                 }
+                roots.add(mediaRoot);
+            });
 
-                const groupPhotos = Array.from(mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO));
+            roots.forEach(mediaRoot => {
+                if (mediaRoot.classList.contains(CONFIG.CLASSES.HIDDEN_ORIGINAL) || mediaRoot.classList.contains('xiv-processing')) return;
 
-                // Failsafe 2: Native embedded video links
-                const hasVideoLink = Array.from(mediaRoot.querySelectorAll('a')).some(a => {
-                    try {
-                        const url = new URL(a.href, window.location.origin);
-                        return url.pathname.includes('/video/');
-                    } catch (e) {
-                        return false;
-                    }
-                });
-
-                if (hasVideoLink) {
-                    groupPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
+                if (mediaRoot.querySelector(CONFIG.SELECTORS.VIDEO_OR_GIF)) {
+                    const allPhotos = mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO);
+                    allPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
                     return;
                 }
 
-                if (groupPhotos.length === 0) return;
+                const groupItems = Array.from(mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO));
+                if (groupItems.length === 0) return;
 
-                const isReady = groupPhotos.every(p => {
-                    const img = p.querySelector('img');
+                const isReady = groupItems.every(item => {
+                    const img = item.querySelector('img');
                     return img && img.src;
                 });
 
                 if (!isReady) return;
 
-                // Lock the group
-                groupPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
+                const mediaData = groupItems.map(item => {
+                    const anchor = item.closest('a');
+                    if (!anchor || !/\/photo\//i.test(anchor.href)) return null;
 
-                const mediaData = groupPhotos.map(p => {
-                    const anchor = p.closest('a');
-                    const img = p.querySelector('img');
+                    const img = item.querySelector('img');
                     return {
                         originalAnchor: anchor,
                         src: img ? img.src : null,
                         alt: img ? img.alt : ''
                     };
-                }).filter(data => data.src);
+                }).filter(data => data && data.src);
 
-                if (mediaData.length === 0) return;
+                if (mediaData.length === 0) {
+                    groupItems.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
+                    return;
+                }
 
-                // Pass to Math Engine
-                MathEngine.process(mediaData, mediaRoot);
+                // Generate cache key from raw URLs
+                const cacheKey = mediaData.map(d => d.src.split('?')[0]).join('|');
+
+                groupItems.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
+
+                // Only trigger the active loading shimmer if the script hasn't seen these images before
+                if (!window.__xivAspectCache.has(cacheKey)) {
+                    mediaRoot.classList.add('xiv-processing');
+                }
+
+                MathEngine.process(mediaData, mediaRoot, cacheKey);
             });
         }
     };
