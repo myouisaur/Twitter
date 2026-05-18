@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/X-Uncrop-Media
 // @icon         https://www.x.com/favicon.ico
-// @version      8.8
+// @version      8.9
 // @description  Uncrops multi-image posts on X (Twitter) by dynamically calculating perfect flex ratios to eliminate empty space.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -32,7 +32,7 @@
             HIDDEN_ORIGINAL: 'xiv-hidden-original'
         },
         OBSERVER_DELAY: 100,
-        MAX_HEIGHT_VH: 70 // Viewport cap for all layouts
+        MAX_HEIGHT_VH: 60 // Viewport cap for all layouts
     };
 
     // 3. APP INITIALIZATION
