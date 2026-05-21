@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         [Twitter] Uncrop Multi-Image Layouts
-// @namespace    https://github.com/myouisaur/X-Uncrop-Media
+// @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      8.9
-// @description  Uncrops multi-image posts on X (Twitter) by dynamically calculating perfect flex ratios to eliminate empty space.
+// @version      9.1
+// @description  Displays multi-image posts on X (Twitter) in their full original proportions without cropped edges.
 // @author       Xiv
 // @match        *://*.x.com/*
 // @match        *://*.twitter.com/*
@@ -18,7 +18,7 @@
     // 1. DUPLICATE EXECUTION GUARD & CACHE INIT
     if (window.top !== window.self || window.__xivUncropInitialized) return;
     window.__xivUncropInitialized = true;
-    window.__xivAspectCache = new Map(); // Memory cache for layout blueprints
+    window.__xivAspectCache = new Map();
 
     // 2. CONFIGURATION
     const CONFIG = {
@@ -32,10 +32,27 @@
             HIDDEN_ORIGINAL: 'xiv-hidden-original'
         },
         OBSERVER_DELAY: 100,
-        MAX_HEIGHT_VH: 60 // Viewport cap for all layouts
+        MAX_HEIGHT_VH: 60
     };
 
-    // 3. APP INITIALIZATION
+    // 3. UTILITIES
+    const Utils = {
+        getHighResSrc(url) {
+            if (!url) return null;
+            try {
+                const u = new URL(url);
+                if (u.searchParams.has('name')) {
+                    u.searchParams.set('name', 'orig');
+                    return u.toString();
+                }
+            } catch (e) {
+                // Fallback if URL constructor fails
+            }
+            return url.replace(/name=[^&]+/, 'name=orig');
+        }
+    };
+
+    // 4. APP INITIALIZATION
     const App = {
         init() {
             UI.injectStyles();
@@ -44,7 +61,7 @@
         }
     };
 
-    // 4. UI & STYLING
+    // 5. UI & STYLING
     const UI = {
         injectStyles() {
             if (document.getElementById(CONFIG.CLASSES.STYLE_ID)) return;
@@ -53,7 +70,7 @@
             style.id = CONFIG.CLASSES.STYLE_ID;
 
             style.textContent = `
-                /* 1. ADVANCED ANIMATION STATES */
+                /* ADVANCED ANIMATION STATES */
                 @keyframes xivShimmerPulse {
                     0% { filter: blur(4px) grayscale(30%) brightness(1); opacity: 0.8; }
                     50% { filter: blur(6px) grayscale(40%) brightness(0.9); opacity: 0.6; }
@@ -66,7 +83,6 @@
                 }
 
                 .xiv-math-grid.xiv-animating {
-                    /* Custom Apple-style spring physics */
                     transition: height 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
                 }
 
@@ -75,8 +91,9 @@
                     transform: translateY(16px) scale(0.98) !important;
                 }
 
-                /* 2. THE MATHEMATICAL GRID SYSTEM */
+                /* THE MATHEMATICAL GRID SYSTEM */
                 .xiv-math-grid {
+                    box-sizing: border-box !important;
                     width: 100% !important;
                     max-width: calc(${CONFIG.MAX_HEIGHT_VH}vh * var(--grid-aspect, 1)) !important;
                     max-height: ${CONFIG.MAX_HEIGHT_VH}vh !important;
@@ -105,17 +122,17 @@
                     min-height: 0 !important;
                 }
 
-                /* 3. ITEM WRAPPERS */
+                /* ITEM WRAPPERS */
                 .xiv-math-item {
+                    box-sizing: border-box !important;
                     position: relative !important;
                     display: flex !important;
                     background-color: rgba(128, 128, 128, 0.05) !important;
                     cursor: pointer !important;
                     min-height: 0 !important;
                     min-width: 0 !important;
-                    overflow: hidden !important; /* Contains the image scaling */
+                    overflow: hidden !important;
 
-                    /* Staggered entrance transition */
                     opacity: 1;
                     transform: translateY(0) scale(1);
                     transition: opacity 0.5s cubic-bezier(0.2, 0.8, 0.2, 1),
@@ -127,12 +144,11 @@
                     opacity: 0.9 !important;
                 }
 
-                /* Disable staggered entrance on cached (instant) renders */
                 .xiv-math-grid:not(.xiv-animating) .xiv-math-item {
                     transition: none !important;
                 }
 
-                /* 4. IMAGES (Depth-scaling effect) */
+                /* IMAGES */
                 .xiv-custom-img {
                     position: absolute !important;
                     top: 0 !important;
@@ -142,27 +158,26 @@
                     object-fit: cover !important;
                     display: block !important;
                     opacity: 0;
-                    transform: scale(1.08) !important; /* Starts zoomed in */
+                    transform: scale(1.08) !important;
                     transition: opacity 0.4s ease-out,
                                 transform 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
                 }
 
                 .xiv-custom-img.xiv-loaded {
                     opacity: 1;
-                    transform: scale(1) !important; /* Smoothly zooms out to 1.0x */
+                    transform: scale(1) !important;
                 }
 
-                /* Prevent zooming animation on instant cached renders */
                 .xiv-math-grid:not(.xiv-animating) .xiv-custom-img {
                     transition: opacity 0.2s ease-out !important;
                 }
 
-                /* 5. SAFELY HIDE NATIVE ENGINE */
+                /* SAFELY HIDE NATIVE ENGINE */
                 .${CONFIG.CLASSES.HIDDEN_ORIGINAL} {
                     display: none !important;
                 }
 
-                /* 6. QUOTE TWEET OVERRIDE */
+                /* QUOTE TWEET OVERRIDE */
                 .xiv-force-column {
                     flex-direction: column-reverse !important;
                     align-items: stretch !important;
@@ -178,7 +193,7 @@
         }
     };
 
-    // 5. MATH & LAYOUT ENGINE
+    // 6. MATH & LAYOUT ENGINE
     const MathEngine = {
         async process(mediaData, mediaRoot, cacheKey) {
             try {
@@ -187,15 +202,13 @@
                 let aspects;
 
                 if (isCached) {
-                    // Instantly pull exact dimensions from memory cache
                     aspects = window.__xivAspectCache.get(cacheKey);
                 } else {
-                    // Pre-load intrinsic dimensions asynchronously for new images
                     const dimensions = await Promise.all(mediaData.map(data => {
                         return new Promise(resolve => {
                             const img = new Image();
                             img.onload = () => resolve(img.naturalWidth / img.naturalHeight);
-                            img.onerror = () => resolve(1); // Fallback
+                            img.onerror = () => resolve(1);
                             img.src = data.src;
                         });
                     }));
@@ -206,7 +219,6 @@
                 const grid = document.createElement('div');
                 grid.className = 'xiv-math-grid';
 
-                // Only apply animation locking if this is a fresh, uncached render
                 if (!isCached) {
                     grid.classList.add('xiv-animating', 'xiv-grid-hidden');
                     grid.style.height = `${oldHeight}px`;
@@ -215,33 +227,31 @@
                 const count = mediaData.length;
                 let finalAspect = 1;
 
-                // Component Builder
                 const createItem = (data, flexVal, index) => {
                     const wrapper = document.createElement('div');
                     wrapper.className = 'xiv-math-item';
-                    wrapper.style.flex = `${flexVal} 1 0%`;
+
+                    // Multiply flex weights by 10000 to mathematically guarantee the flex-grow
+                    // sum never drops below 1.0 (which would cause empty space and cropping).
+                    wrapper.style.flex = `${flexVal * 10000} 1 0%`;
+
                     wrapper.style.setProperty('--stagger-idx', index);
                     wrapper.setAttribute('role', 'button');
                     wrapper.setAttribute('tabindex', '0');
 
-                    let highResSrc = data.src;
-                    try {
-                        const url = new URL(data.src);
-                        if (url.searchParams.has('name')) {
-                            url.searchParams.set('name', 'large');
-                            highResSrc = url.toString();
-                        }
-                    } catch (e) {
-                        highResSrc = data.src.replace(/name=[^&]+/, 'name=large');
-                    }
-
                     const img = document.createElement('img');
-                    img.src = highResSrc;
+                    img.src = data.src;
                     img.alt = data.alt || '';
                     img.className = 'xiv-custom-img';
                     img.setAttribute('loading', 'lazy');
                     img.setAttribute('decoding', 'async');
-                    img.onload = () => img.classList.add('xiv-loaded');
+
+                    const setLoaded = () => img.classList.add('xiv-loaded');
+                    if (img.complete && img.naturalHeight !== 0) {
+                        setLoaded();
+                    } else {
+                        img.onload = setLoaded;
+                    }
 
                     wrapper.appendChild(img);
 
@@ -277,7 +287,7 @@
 
                     const rightCol = document.createElement('div');
                     rightCol.className = 'xiv-math-col';
-                    rightCol.style.flex = '1 1 0%';
+                    rightCol.style.flex = `${10000} 1 0%`; // Scaled equivalent to flex 1
                     rightCol.appendChild(createItem(mediaData[1], 1 / aspects[1], 1));
                     rightCol.appendChild(createItem(mediaData[2], 1 / aspects[2], 2));
                     grid.appendChild(rightCol);
@@ -291,13 +301,13 @@
 
                     const row1 = document.createElement('div');
                     row1.className = 'xiv-math-row';
-                    row1.style.flex = `${1 / r1} 1 0%`;
+                    row1.style.flex = `${(1 / r1) * 10000} 1 0%`; // Scaled correctly
                     row1.appendChild(createItem(mediaData[0], aspects[0], 0));
                     row1.appendChild(createItem(mediaData[1], aspects[1], 1));
 
                     const row2 = document.createElement('div');
                     row2.className = 'xiv-math-row';
-                    row2.style.flex = `${1 / r2} 1 0%`;
+                    row2.style.flex = `${(1 / r2) * 10000} 1 0%`; // Scaled correctly
                     row2.appendChild(createItem(mediaData[2], aspects[2], 2));
                     row2.appendChild(createItem(mediaData[3], aspects[3], 3));
 
@@ -318,8 +328,6 @@
                     mediaRoot.parentNode.insertBefore(grid, mediaRoot.nextSibling);
                 }
 
-                // If cached, CSS naturally dictates height immediately.
-                // Only run animation transitions for new un-cached discoveries.
                 if (!isCached) {
                     const viewportVh = window.innerHeight * (CONFIG.MAX_HEIGHT_VH / 100);
                     const targetHeight = grid.offsetWidth > 0 ? Math.min(grid.offsetWidth / finalAspect, viewportVh) : oldHeight;
@@ -341,7 +349,7 @@
         }
     };
 
-    // 6. DOM PROCESSING
+    // 7. DOM PROCESSING
     const DOMProcessor = {
         scan() {
             const unprocessedItems = document.querySelectorAll(`${CONFIG.SELECTORS.PHOTO}:not(.${CONFIG.CLASSES.PROCESSED})`);
@@ -393,9 +401,11 @@
                     if (!anchor || !/\/photo\//i.test(anchor.href)) return null;
 
                     const img = item.querySelector('img');
+                    const src = img ? Utils.getHighResSrc(img.src) : null;
+
                     return {
                         originalAnchor: anchor,
-                        src: img ? img.src : null,
+                        src: src,
                         alt: img ? img.alt : ''
                     };
                 }).filter(data => data && data.src);
@@ -405,12 +415,10 @@
                     return;
                 }
 
-                // Generate cache key from raw URLs
                 const cacheKey = mediaData.map(d => d.src.split('?')[0]).join('|');
 
                 groupItems.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
 
-                // Only trigger the active loading shimmer if the script hasn't seen these images before
                 if (!window.__xivAspectCache.has(cacheKey)) {
                     mediaRoot.classList.add('xiv-processing');
                 }
@@ -420,7 +428,7 @@
         }
     };
 
-    // 7. OBSERVERS
+    // 8. OBSERVERS
     const Observers = {
         observer: null,
         timer: null,
@@ -459,7 +467,7 @@
         }
     };
 
-    // 8. BOOTSTRAP
+    // 9. BOOTSTRAP
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', App.init);
     } else {
