@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      9.1
+// @version      9.2
 // @description  Displays multi-image posts on X (Twitter) in their full original proportions without cropped edges.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -177,10 +177,19 @@
                     display: none !important;
                 }
 
-                /* QUOTE TWEET OVERRIDE */
+                /* QUOTE TWEET OVERRIDE
+                   column-reverse keeps the grid visually above the caption
+                   while preserving natural DOM order (caption first in markup). */
                 .xiv-force-column {
                     flex-direction: column-reverse !important;
                     align-items: stretch !important;
+                }
+
+                /* Belt-and-suspenders: grid must never overflow the quote block
+                   horizontally even in the window before the force-column class lands. */
+                .xiv-force-column .xiv-math-grid {
+                    max-width: 100% !important;
+                    min-width: 0 !important;
                 }
 
                 @media (prefers-color-scheme: dark) {
@@ -193,7 +202,67 @@
         }
     };
 
-    // 6. MATH & LAYOUT ENGINE
+    // 6. QUOTE TWEET GUARD
+    // Isolated module that owns all quote-tweet layout detection and correction.
+    // Uses computed style (not class sniffing) so it reads actual rendered state,
+    // then watches for late class mutations from Twitter's React renderer and
+    // corrects immediately if the parent flips to row after our grid is inserted.
+    const QuoteTweetGuard = {
+        // Returns true if the parent container is currently laid out as a row
+        // (meaning our grid and the caption are sitting side by side).
+        parentIsRow(parent) {
+            return getComputedStyle(parent).flexDirection === 'row';
+        },
+
+        // Apply the column correction to the parent.
+        applyFix(parent) {
+            if (!parent.classList.contains('xiv-force-column')) {
+                parent.classList.add('xiv-force-column');
+            }
+        },
+
+        // Watch the parent for class attribute mutations after grid insertion.
+        // Twitter's React renderer may add layout classes asynchronously.
+        // The observer is one-shot: disconnects the moment a correction is made
+        // or after a short timeout — leaves zero ongoing footprint.
+        watchParent(parent) {
+            let settled = false;
+
+            const observer = new MutationObserver(() => {
+                if (settled) return;
+                if (this.parentIsRow(parent)) {
+                    this.applyFix(parent);
+                    settled = true;
+                    observer.disconnect();
+                }
+            });
+
+            observer.observe(parent, { attributes: true, attributeFilter: ['class', 'style'] });
+
+            // Safety timeout: disconnect regardless after 2s.
+            // By then, Twitter's renderer has long since settled.
+            setTimeout(() => {
+                if (!settled) observer.disconnect();
+            }, 2000);
+        },
+
+        // Main entry point called from MathEngine after grid insertion.
+        // Checks the current computed state, fixes immediately if needed,
+        // then always starts the watcher to catch late mutations.
+        evaluate(parent, isStatusPage) {
+            if (isStatusPage) return;
+
+            if (this.parentIsRow(parent)) {
+                this.applyFix(parent);
+            }
+
+            // Always watch — the race condition means "not row right now"
+            // does not guarantee it stays that way after React re-renders.
+            this.watchParent(parent);
+        }
+    };
+
+    // 7. MATH & LAYOUT ENGINE
     const MathEngine = {
         async process(mediaData, mediaRoot, cacheKey) {
             try {
@@ -274,6 +343,7 @@
                     finalAspect = aspects[0] + aspects[1];
                     grid.style.display = 'flex';
                     grid.style.flexDirection = 'row';
+
                     grid.appendChild(createItem(mediaData[0], aspects[0], 0));
                     grid.appendChild(createItem(mediaData[1], aspects[1], 1));
                 }
@@ -322,10 +392,11 @@
 
                 if (mediaRoot.parentNode) {
                     const isStatusPage = window.location.pathname.includes('/status/');
-                    if (!isStatusPage && mediaRoot.parentNode.classList.contains('r-18u37iz')) {
-                        mediaRoot.parentNode.classList.add('xiv-force-column');
-                    }
                     mediaRoot.parentNode.insertBefore(grid, mediaRoot.nextSibling);
+
+                    // Evaluate after insertion so getComputedStyle reflects the
+                    // actual layout context the grid now lives in.
+                    QuoteTweetGuard.evaluate(mediaRoot.parentNode, isStatusPage);
                 }
 
                 if (!isCached) {
@@ -344,12 +415,12 @@
                 }
 
             } catch (error) {
-                console.warn('[Twitter Uncrop] MathEngine failed to process dimensions:', error);
+                console.warn('[Twitter Uncrop][MathEngine] Failed to process dimensions:', error);
             }
         }
     };
 
-    // 7. DOM PROCESSING
+    // 8. DOM PROCESSING
     const DOMProcessor = {
         scan() {
             const unprocessedItems = document.querySelectorAll(`${CONFIG.SELECTORS.PHOTO}:not(.${CONFIG.CLASSES.PROCESSED})`);
@@ -428,7 +499,7 @@
         }
     };
 
-    // 8. OBSERVERS
+    // 9. OBSERVERS
     const Observers = {
         observer: null,
         timer: null,
@@ -467,7 +538,7 @@
         }
     };
 
-    // 9. BOOTSTRAP
+    // 10. BOOTSTRAP
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', App.init);
     } else {
