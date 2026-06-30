@@ -2,7 +2,7 @@
 // @name         [Twitter] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      7.0
+// @version      7.2
 // @description  Adds floating liquid glass buttons to images and videos for seamless background downloading.
 // @author       Xiv
 // @match        *://*.twitter.com/*
@@ -137,6 +137,33 @@
       return urlMatch ? urlMatch[1] : null;
     },
 
+    // Determines which video "slot" (0-indexed, document order) a given leaf video
+    // node occupies within its tweet. Twitter renders multi-video tweets in the same
+    // order as extended_entities.media, so this index lines up with the cache key
+    // built in Interceptor.extractVideos(). Operates on DOM.getLeafVideoNodes() so a
+    // shared grid wrapper (which can match SAFE_PARENT for every video in the post)
+    // never collapses distinct videos down to the same index.
+    getVideoSlotIndex(videoComp) {
+      if (!videoComp) return 0;
+      const tweetContainer = videoComp.closest(CONFIG.SELECTORS.TWEET);
+      if (!tweetContainer) return 0;
+
+      const leaves = DOM.getLeafVideoNodes(tweetContainer);
+      const index = leaves.indexOf(videoComp);
+      return index >= 0 ? index : 0;
+    },
+
+    // Extracts a video's own media ID from its poster/thumbnail URL (e.g.
+    // .../ext_tw_video_thumb/{id}/... or .../amplify_video_thumb/{id}/...). This ID
+    // matches extended_entities.media[].id_str exactly, so it's a more reliable way
+    // to identify "which video is this" than DOM-order heuristics when available.
+    getPosterMediaId(videoComp) {
+      const posterUrl = videoComp.querySelector('video')?.poster || videoComp.querySelector('img')?.src;
+      if (!posterUrl) return null;
+      const match = posterUrl.match(/\/(?:ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb)\/(\d+)\//);
+      return match ? match[1] : null;
+    },
+
     fetchAndSaveBlob(url, filename, onProgress) {
       return new Promise((resolve, reject) => {
         if (typeof GM_xmlhttpRequest === 'undefined') {
@@ -236,6 +263,7 @@
 
         if (obj.extended_entities?.media) {
           const id = obj.id_str;
+          let videoSlot = 0;
           obj.extended_entities.media.forEach(media => {
             if ((media.type === 'video' || media.type === 'animated_gif') && media.video_info) {
               const variants = media.video_info.variants;
@@ -244,8 +272,15 @@
                 if (State.videoCache.size >= CONFIG.MAX_CACHE_SIZE) {
                   State.videoCache.delete(State.videoCache.keys().next().value);
                 }
-                State.videoCache.set(id, best.url);
+                // Primary key: the media item's own unique id_str. This is the most
+                // reliable lookup since it can be cross-referenced directly from the
+                // poster thumbnail URL on the DOM side — no ordering assumptions needed.
+                if (media.id_str) State.videoCache.set(media.id_str, best.url);
+                // Secondary key (tweetId-slotIndex): fallback for when the poster URL
+                // can't be read yet (e.g. video hasn't rendered a thumbnail).
+                State.videoCache.set(`${id}-${videoSlot}`, best.url);
               }
+              videoSlot++;
             }
           });
         }
@@ -664,6 +699,28 @@
   };
 
   const DOM = {
+    // Filters raw SELECTORS.VIDEO matches down to "leaf" nodes only — matches that
+    // don't themselves contain another match. Twitter sometimes wraps a multi-video
+    // grid in one shared testid container with individual per-video players nested
+    // inside; without this filter, the shared outer wrapper would be treated as an
+    // extra "video" and every real video would resolve back to that same wrapper.
+    getLeafVideoNodes(scopeEl) {
+      const matches = Array.from(scopeEl.querySelectorAll(CONFIG.SELECTORS.VIDEO));
+      return matches.filter(node => !matches.some(other => other !== node && node.contains(other)));
+    },
+
+    // Picks where to mount a video's button container. Prefers the nearest
+    // SAFE_PARENT ancestor for nicer positioning/clipping, but only if that ancestor
+    // wraps exactly one video — otherwise it's a shared grid wrapper, and mounting
+    // there would stack every video's buttons on top of each other at the same spot.
+    findSafeParent(videoComp) {
+      const candidate = videoComp.closest(CONFIG.SELECTORS.SAFE_PARENT) || videoComp.parentElement;
+      if (candidate && candidate.querySelectorAll(CONFIG.SELECTORS.VIDEO).length > 1) {
+        return videoComp;
+      }
+      return candidate || videoComp;
+    },
+
     mountContainer(safeParent, positionClass, insertAfterTarget = null) {
       if (!safeParent) return null;
 
@@ -712,13 +769,37 @@
     },
 
     injectVideoButtons(videoComp) {
-      const safeParent = videoComp.closest(CONFIG.SELECTORS.SAFE_PARENT) || videoComp.parentElement;
+      const safeParent = this.findSafeParent(videoComp);
       const container = this.mountContainer(safeParent, CONFIG.CLASSES.POS_RIGHT);
       if (!container) return;
 
+      const slotIndex = Media.getVideoSlotIndex(videoComp);
+
       const getUrlData = () => {
         const id = Media.getTweetId(videoComp);
-        if (id && State.videoCache.has(id)) return { url: State.videoCache.get(id), id };
+        if (!id) return null;
+
+        // Tier 1: match by the video's own media ID read from its poster thumbnail.
+        // Most reliable — independent of render order or grid structure.
+        const posterMediaId = Media.getPosterMediaId(videoComp);
+        if (posterMediaId && State.videoCache.has(posterMediaId)) {
+          return { url: State.videoCache.get(posterMediaId), id };
+        }
+
+        // Tier 2: composite tweetId-slotIndex, correlated via DOM/API render order.
+        const exactKey = `${id}-${slotIndex}`;
+        if (State.videoCache.has(exactKey)) {
+          return { url: State.videoCache.get(exactKey), id };
+        }
+
+        // Tier 3: last resort — grab slot 0 rather than showing "not cached"
+        // when SOME video for this tweet did make it into the cache.
+        const fallbackKey = `${id}-0`;
+        if (State.videoCache.has(fallbackKey)) {
+          Utils.log(`No exact match for ${exactKey} (poster id: ${posterMediaId}), falling back to ${fallbackKey}`);
+          return { url: State.videoCache.get(fallbackKey), id };
+        }
+
         return null;
       };
 
@@ -730,7 +811,7 @@
 
       const dlBtn = UI.createButton('Download MP4', ICONS.DOWNLOAD, (btn, icon) => {
         const data = getUrlData();
-        if (data) Handlers.handleDownload(btn, icon, data.url, `x-vid-${data.id}.mp4`, ICONS.DOWNLOAD);
+        if (data) Handlers.handleDownload(btn, icon, data.url, `x-vid-${data.id}-${slotIndex}.mp4`, ICONS.DOWNLOAD);
         else Utils.showToast('Video URL not cached. Try playing it for a second.');
       });
 
@@ -740,7 +821,7 @@
 
     scan() {
       const rawImgs = Array.from(document.querySelectorAll(CONFIG.SELECTORS.IMG));
-      const rawVideos = Array.from(document.querySelectorAll(CONFIG.SELECTORS.VIDEO));
+      const rawVideos = this.getLeafVideoNodes(document);
 
       rawImgs.forEach(img => {
         if (img.dataset.xivObserved || CONFIG.EXCLUDE_URLS.some(p => img.src.includes(p))) return;
@@ -749,8 +830,7 @@
       });
 
       rawVideos.forEach(vid => {
-        const parent = vid.closest(CONFIG.SELECTORS.SAFE_PARENT) || vid.parentElement;
-        if (vid.dataset.xivObserved || (parent && parent.querySelector(`.${CONFIG.CLASSES.CONTAINER}`))) return;
+        if (vid.dataset.xivObserved) return;
         vid.dataset.xivObserved = 'true';
         State.observer.observe(vid);
       });
