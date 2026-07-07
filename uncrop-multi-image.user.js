@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      9.2
+// @version      10.0
 // @description  Displays multi-image posts on X (Twitter) in their full original proportions without cropped edges.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -18,24 +18,61 @@
     // 1. DUPLICATE EXECUTION GUARD & CACHE INIT
     if (window.top !== window.self || window.__xivUncropInitialized) return;
     window.__xivUncropInitialized = true;
-    window.__xivAspectCache = new Map();
+
+    if (!window.__xivAspectCache) {
+        window.__xivAspectCache = new Map();
+    }
 
     // 2. CONFIGURATION
     const CONFIG = {
+        DEBUG: false,
+        CACHE: {
+            MAX_SIZE: 500
+        },
+        LAYOUT: {
+            MAX_HEIGHT_VH: 60,
+            FLEX_MULTIPLIER: 10000,
+            GAP_PX: 2,
+            MARGIN_TOP_PX: 12
+        },
+        ANIMATION: {
+            RESIZE_DURATION_MS: 600,
+            OBSERVER_DELAY_MS: 100
+        },
         SELECTORS: {
             PHOTO: 'div[data-testid="tweetPhoto"]',
-            VIDEO_OR_GIF: 'video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="playButton"]'
+            VIDEO_OR_GIF: 'video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="playButton"]',
+            ARTICLE_TAG: 'ARTICLE',
+            TWEET_WRAPPER: '[data-testid="tweet"]',
+            TEXT_MARKERS: '[data-testid="tweetText"], [data-testid="User-Name"], time'
         },
         CLASSES: {
             PROCESSED: 'xiv-processed',
             STYLE_ID: 'xiv-uncrop-styles',
             HIDDEN_ORIGINAL: 'xiv-hidden-original'
-        },
-        OBSERVER_DELAY: 100,
-        MAX_HEIGHT_VH: 60
+        }
     };
 
-    // 3. UTILITIES
+    // 3. UTILITIES & LOGGING
+    const Logger = {
+        log: (...args) => CONFIG.DEBUG && console.log('[Twitter Uncrop]', ...args),
+        warn: (...args) => console.warn('[Twitter Uncrop][Warning]', ...args),
+        error: (...args) => console.error('[Twitter Uncrop][Error]', ...args)
+    };
+
+    const CacheManager = {
+        has: (key) => window.__xivAspectCache.has(key),
+        get: (key) => window.__xivAspectCache.get(key),
+        set: (key, value) => {
+            if (window.__xivAspectCache.size >= CONFIG.CACHE.MAX_SIZE) {
+                const oldestKey = window.__xivAspectCache.keys().next().value;
+                window.__xivAspectCache.delete(oldestKey);
+                Logger.log('Cache limit reached. Pruned oldest entry.');
+            }
+            window.__xivAspectCache.set(key, value);
+        }
+    };
+
     const Utils = {
         getHighResSrc(url) {
             if (!url) return null;
@@ -46,8 +83,9 @@
                     return u.toString();
                 }
             } catch (e) {
-                // Fallback if URL constructor fails
+                Logger.warn('URL parsing failed for:', url, e);
             }
+            // Fallback if URL constructor fails
             return url.replace(/name=[^&]+/, 'name=orig');
         }
     };
@@ -55,8 +93,9 @@
     // 4. APP INITIALIZATION
     const App = {
         init() {
+            Logger.log(`Initializing v${GM_info?.script?.version || '9.4'}`);
             UI.injectStyles();
-            DOMProcessor.scan();
+            DOMProcessor.scan(document);
             Observers.start();
         }
     };
@@ -65,7 +104,6 @@
     const UI = {
         injectStyles() {
             if (document.getElementById(CONFIG.CLASSES.STYLE_ID)) return;
-
             const style = document.createElement('style');
             style.id = CONFIG.CLASSES.STYLE_ID;
 
@@ -83,7 +121,7 @@
                 }
 
                 .xiv-math-grid.xiv-animating {
-                    transition: height 0.6s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
+                    transition: height ${(CONFIG.ANIMATION.RESIZE_DURATION_MS / 1000).toFixed(1)}s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
                 }
 
                 .xiv-grid-hidden .xiv-math-item {
@@ -95,13 +133,13 @@
                 .xiv-math-grid {
                     box-sizing: border-box !important;
                     width: 100% !important;
-                    max-width: calc(${CONFIG.MAX_HEIGHT_VH}vh * var(--grid-aspect, 1)) !important;
-                    max-height: ${CONFIG.MAX_HEIGHT_VH}vh !important;
+                    max-width: calc(${CONFIG.LAYOUT.MAX_HEIGHT_VH}vh * var(--grid-aspect, 1)) !important;
+                    max-height: ${CONFIG.LAYOUT.MAX_HEIGHT_VH}vh !important;
                     aspect-ratio: var(--grid-aspect) !important;
-                    margin-top: 12px !important;
+                    margin-top: ${CONFIG.LAYOUT.MARGIN_TOP_PX}px !important;
                     margin-left: auto !important;
                     margin-right: auto !important;
-                    gap: 2px !important;
+                    gap: ${CONFIG.LAYOUT.GAP_PX}px !important;
                     border-radius: clamp(8px, 1vw, 14px) !important;
                     overflow: hidden !important;
                     border: 1px solid rgba(128, 128, 128, 0.15) !important;
@@ -111,14 +149,14 @@
                 .xiv-math-col {
                     display: flex !important;
                     flex-direction: column !important;
-                    gap: 2px !important;
+                    gap: ${CONFIG.LAYOUT.GAP_PX}px !important;
                     min-width: 0 !important;
                 }
 
                 .xiv-math-row {
                     display: flex !important;
                     flex-direction: row !important;
-                    gap: 2px !important;
+                    gap: ${CONFIG.LAYOUT.GAP_PX}px !important;
                     min-height: 0 !important;
                 }
 
@@ -177,101 +215,25 @@
                     display: none !important;
                 }
 
-                /* QUOTE TWEET OVERRIDE
-                   column-reverse keeps the grid visually above the caption
-                   while preserving natural DOM order (caption first in markup). */
-                .xiv-force-column {
-                    flex-direction: column-reverse !important;
-                    align-items: stretch !important;
-                }
-
-                /* Belt-and-suspenders: grid must never overflow the quote block
-                   horizontally even in the window before the force-column class lands. */
-                .xiv-force-column .xiv-math-grid {
-                    max-width: 100% !important;
-                    min-width: 0 !important;
-                }
-
                 @media (prefers-color-scheme: dark) {
                     .xiv-math-grid { border-color: rgba(255, 255, 255, 0.1) !important; }
                     .xiv-math-item { background-color: rgba(255, 255, 255, 0.03) !important; }
                 }
             `;
-
             document.head.appendChild(style);
         }
     };
 
-    // 6. QUOTE TWEET GUARD
-    // Isolated module that owns all quote-tweet layout detection and correction.
-    // Uses computed style (not class sniffing) so it reads actual rendered state,
-    // then watches for late class mutations from Twitter's React renderer and
-    // corrects immediately if the parent flips to row after our grid is inserted.
-    const QuoteTweetGuard = {
-        // Returns true if the parent container is currently laid out as a row
-        // (meaning our grid and the caption are sitting side by side).
-        parentIsRow(parent) {
-            return getComputedStyle(parent).flexDirection === 'row';
-        },
-
-        // Apply the column correction to the parent.
-        applyFix(parent) {
-            if (!parent.classList.contains('xiv-force-column')) {
-                parent.classList.add('xiv-force-column');
-            }
-        },
-
-        // Watch the parent for class attribute mutations after grid insertion.
-        // Twitter's React renderer may add layout classes asynchronously.
-        // The observer is one-shot: disconnects the moment a correction is made
-        // or after a short timeout — leaves zero ongoing footprint.
-        watchParent(parent) {
-            let settled = false;
-
-            const observer = new MutationObserver(() => {
-                if (settled) return;
-                if (this.parentIsRow(parent)) {
-                    this.applyFix(parent);
-                    settled = true;
-                    observer.disconnect();
-                }
-            });
-
-            observer.observe(parent, { attributes: true, attributeFilter: ['class', 'style'] });
-
-            // Safety timeout: disconnect regardless after 2s.
-            // By then, Twitter's renderer has long since settled.
-            setTimeout(() => {
-                if (!settled) observer.disconnect();
-            }, 2000);
-        },
-
-        // Main entry point called from MathEngine after grid insertion.
-        // Checks the current computed state, fixes immediately if needed,
-        // then always starts the watcher to catch late mutations.
-        evaluate(parent, isStatusPage) {
-            if (isStatusPage) return;
-
-            if (this.parentIsRow(parent)) {
-                this.applyFix(parent);
-            }
-
-            // Always watch — the race condition means "not row right now"
-            // does not guarantee it stays that way after React re-renders.
-            this.watchParent(parent);
-        }
-    };
-
-    // 7. MATH & LAYOUT ENGINE
+    // 6. MATH & LAYOUT ENGINE
     const MathEngine = {
         async process(mediaData, mediaRoot, cacheKey) {
             try {
                 const oldHeight = mediaRoot.offsetHeight;
-                const isCached = window.__xivAspectCache.has(cacheKey);
+                const isCached = CacheManager.has(cacheKey);
                 let aspects;
 
                 if (isCached) {
-                    aspects = window.__xivAspectCache.get(cacheKey);
+                    aspects = CacheManager.get(cacheKey);
                 } else {
                     const dimensions = await Promise.all(mediaData.map(data => {
                         return new Promise(resolve => {
@@ -282,7 +244,7 @@
                         });
                     }));
                     aspects = dimensions;
-                    window.__xivAspectCache.set(cacheKey, aspects);
+                    CacheManager.set(cacheKey, aspects);
                 }
 
                 const grid = document.createElement('div');
@@ -295,15 +257,14 @@
 
                 const count = mediaData.length;
                 let finalAspect = 1;
+                const flexMulti = CONFIG.LAYOUT.FLEX_MULTIPLIER;
 
                 const createItem = (data, flexVal, index) => {
                     const wrapper = document.createElement('div');
                     wrapper.className = 'xiv-math-item';
 
-                    // Multiply flex weights by 10000 to mathematically guarantee the flex-grow
-                    // sum never drops below 1.0 (which would cause empty space and cropping).
-                    wrapper.style.flex = `${flexVal * 10000} 1 0%`;
-
+                    // Flex scaled up to prevent cropping / visual collapse
+                    wrapper.style.flex = `${flexVal * flexMulti} 1 0%`;
                     wrapper.style.setProperty('--stagger-idx', index);
                     wrapper.setAttribute('role', 'button');
                     wrapper.setAttribute('tabindex', '0');
@@ -323,13 +284,11 @@
                     }
 
                     wrapper.appendChild(img);
-
                     wrapper.addEventListener('click', (e) => {
                         e.preventDefault();
                         e.stopPropagation();
                         if (data.originalAnchor) data.originalAnchor.click();
                     });
-
                     return wrapper;
                 };
 
@@ -354,10 +313,9 @@
                     grid.style.flexDirection = 'row';
 
                     grid.appendChild(createItem(mediaData[0], aspects[0] * rSum, 0));
-
                     const rightCol = document.createElement('div');
                     rightCol.className = 'xiv-math-col';
-                    rightCol.style.flex = `${10000} 1 0%`; // Scaled equivalent to flex 1
+                    rightCol.style.flex = `${flexMulti} 1 0%`;
                     rightCol.appendChild(createItem(mediaData[1], 1 / aspects[1], 1));
                     rightCol.appendChild(createItem(mediaData[2], 1 / aspects[2], 2));
                     grid.appendChild(rightCol);
@@ -371,13 +329,13 @@
 
                     const row1 = document.createElement('div');
                     row1.className = 'xiv-math-row';
-                    row1.style.flex = `${(1 / r1) * 10000} 1 0%`; // Scaled correctly
+                    row1.style.flex = `${(1 / r1) * flexMulti} 1 0%`;
                     row1.appendChild(createItem(mediaData[0], aspects[0], 0));
                     row1.appendChild(createItem(mediaData[1], aspects[1], 1));
 
                     const row2 = document.createElement('div');
                     row2.className = 'xiv-math-row';
-                    row2.style.flex = `${(1 / r2) * 10000} 1 0%`; // Scaled correctly
+                    row2.style.flex = `${(1 / r2) * flexMulti} 1 0%`;
                     row2.appendChild(createItem(mediaData[2], aspects[2], 2));
                     row2.appendChild(createItem(mediaData[3], aspects[3], 3));
 
@@ -386,21 +344,15 @@
                 }
 
                 grid.style.setProperty('--grid-aspect', finalAspect);
-
                 mediaRoot.classList.remove('xiv-processing');
                 mediaRoot.classList.add(CONFIG.CLASSES.HIDDEN_ORIGINAL);
 
                 if (mediaRoot.parentNode) {
-                    const isStatusPage = window.location.pathname.includes('/status/');
                     mediaRoot.parentNode.insertBefore(grid, mediaRoot.nextSibling);
-
-                    // Evaluate after insertion so getComputedStyle reflects the
-                    // actual layout context the grid now lives in.
-                    QuoteTweetGuard.evaluate(mediaRoot.parentNode, isStatusPage);
                 }
 
                 if (!isCached) {
-                    const viewportVh = window.innerHeight * (CONFIG.MAX_HEIGHT_VH / 100);
+                    const viewportVh = window.innerHeight * (CONFIG.LAYOUT.MAX_HEIGHT_VH / 100);
                     const targetHeight = grid.offsetWidth > 0 ? Math.min(grid.offsetWidth / finalAspect, viewportVh) : oldHeight;
 
                     requestAnimationFrame(() => {
@@ -410,20 +362,24 @@
                         setTimeout(() => {
                             grid.classList.remove('xiv-animating');
                             grid.style.height = '';
-                        }, 600);
+                        }, CONFIG.ANIMATION.RESIZE_DURATION_MS);
                     });
                 }
 
+                Logger.log(`Processed layout for cache key: ${cacheKey}`);
             } catch (error) {
-                console.warn('[Twitter Uncrop][MathEngine] Failed to process dimensions:', error);
+                Logger.error('Failed to process dimensions:', error);
             }
         }
     };
 
-    // 8. DOM PROCESSING
+    // 7. DOM PROCESSING
     const DOMProcessor = {
-        scan() {
-            const unprocessedItems = document.querySelectorAll(`${CONFIG.SELECTORS.PHOTO}:not(.${CONFIG.CLASSES.PROCESSED})`);
+        scan(scopeNode = document) {
+            // Optimization: Query only within the modified scope when possible
+            const unprocessedItems = scopeNode.querySelectorAll(`${CONFIG.SELECTORS.PHOTO}:not(.${CONFIG.CLASSES.PROCESSED})`);
+            if (unprocessedItems.length === 0) return;
+
             const roots = new Set();
 
             unprocessedItems.forEach(item => {
@@ -436,10 +392,12 @@
                 let current = item.parentElement;
                 let mediaRoot = item;
 
-                while (current && current.tagName !== 'ARTICLE') {
-                    if (current.querySelector('[data-testid="tweetText"]') ||
-                        current.querySelector('[data-testid="User-Name"]') ||
-                        current.querySelector('time')) {
+                // Robust Traversal: Look for Article tag OR Tweet wrapper as boundaries
+                while (current &&
+                       current.tagName !== CONFIG.SELECTORS.ARTICLE_TAG &&
+                       !current.matches(CONFIG.SELECTORS.TWEET_WRAPPER)) {
+
+                    if (current.querySelector(CONFIG.SELECTORS.TEXT_MARKERS)) {
                         break;
                     }
                     mediaRoot = current;
@@ -450,6 +408,19 @@
 
             roots.forEach(mediaRoot => {
                 if (mediaRoot.classList.contains(CONFIG.CLASSES.HIDDEN_ORIGINAL) || mediaRoot.classList.contains('xiv-processing')) return;
+
+                // NATIVE QUOTE TWEET SAFEGUARD:
+                // If Twitter placed the media side-by-side with text (row layout),
+                // it is a native "compressed" quote tweet. Leave it entirely alone.
+                if (mediaRoot.parentElement) {
+                    const parentStyle = window.getComputedStyle(mediaRoot.parentElement);
+                    if (parentStyle.flexDirection === 'row') {
+                        const allPhotos = mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO);
+                        allPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
+                        Logger.log('Ignored native row layout Quote Tweet.');
+                        return;
+                    }
+                }
 
                 if (mediaRoot.querySelector(CONFIG.SELECTORS.VIDEO_OR_GIF)) {
                     const allPhotos = mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO);
@@ -470,10 +441,8 @@
                 const mediaData = groupItems.map(item => {
                     const anchor = item.closest('a');
                     if (!anchor || !/\/photo\//i.test(anchor.href)) return null;
-
                     const img = item.querySelector('img');
                     const src = img ? Utils.getHighResSrc(img.src) : null;
-
                     return {
                         originalAnchor: anchor,
                         src: src,
@@ -487,10 +456,9 @@
                 }
 
                 const cacheKey = mediaData.map(d => d.src.split('?')[0]).join('|');
-
                 groupItems.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
 
-                if (!window.__xivAspectCache.has(cacheKey)) {
+                if (!CacheManager.has(cacheKey)) {
                     mediaRoot.classList.add('xiv-processing');
                 }
 
@@ -499,14 +467,15 @@
         }
     };
 
-    // 9. OBSERVERS
+    // 8. OBSERVERS
     const Observers = {
         observer: null,
         timer: null,
 
         start() {
             this.observer = new MutationObserver((mutations) => {
-                let shouldScan = false;
+                let scopeNodes = new Set();
+                let fullScanRequired = false;
 
                 for (let i = 0; i < mutations.length; i++) {
                     const addedNodes = mutations[i].addedNodes;
@@ -514,23 +483,31 @@
                         const node = addedNodes[j];
 
                         if (node.nodeType === 1) {
-                            if (node.tagName === 'ARTICLE' ||
-                                node.tagName === 'IMG' ||
-                                (node.matches && node.matches(CONFIG.SELECTORS.PHOTO)) ||
-                                node.querySelector(CONFIG.SELECTORS.PHOTO)) {
-                                shouldScan = true;
+                            if (node.tagName === CONFIG.SELECTORS.ARTICLE_TAG ||
+                                (node.matches && node.matches(CONFIG.SELECTORS.PHOTO))) {
+                                // Specific container added, target scan
+                                scopeNodes.add(node);
+                            } else if (node.querySelector(CONFIG.SELECTORS.PHOTO)) {
+                                // Broad update, fallback to full scan
+                                fullScanRequired = true;
                                 break;
                             }
                         }
                     }
-                    if (shouldScan) break;
+                    if (fullScanRequired) break;
                 }
 
-                if (shouldScan) {
+                if (scopeNodes.size > 0 || fullScanRequired) {
                     clearTimeout(this.timer);
                     this.timer = setTimeout(() => {
-                        requestAnimationFrame(() => DOMProcessor.scan());
-                    }, CONFIG.OBSERVER_DELAY);
+                        requestAnimationFrame(() => {
+                            if (fullScanRequired) {
+                                DOMProcessor.scan(document);
+                            } else {
+                                scopeNodes.forEach(node => DOMProcessor.scan(node));
+                            }
+                        });
+                    }, CONFIG.ANIMATION.OBSERVER_DELAY_MS);
                 }
             });
 
@@ -538,7 +515,7 @@
         }
     };
 
-    // 10. BOOTSTRAP
+    // 9. BOOTSTRAP
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', App.init);
     } else {
