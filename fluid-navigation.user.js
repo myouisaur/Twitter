@@ -2,7 +2,7 @@
 // @name         [Twitter] Fluid Navigation
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      2.2
+// @version      2.3
 // @description  Overrides default scrolling to smoothly glide the timeline, with directional scroll-locking friction for tall posts.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -31,7 +31,7 @@
         },
         SCROLL: {
             HEADER_OFFSET_DEFAULT: 55, // Standard timeline top nav bar
-            HEADER_OFFSET_QUOTES: 100, // Taller nav bar on the /quotes pages
+            HEADER_OFFSET_TALL: 100,   // Taller nav bar on the /quotes and /search pages
             TOLERANCE_PX: 10,          // Buffer zone to determine which tweet is currently "active"
             MIN_SNAP_HEIGHT_PX: 20,    // Ignore empty structural spacers Twitter uses for padding
             BRAKE_DURATION_MS: 1000    // (1 second) How long the scroll completely locks when hitting a tall boundary
@@ -70,7 +70,7 @@
     // 4. SPA NAVIGATION TRACKER
     const SPA = {
         lastUrl: location.href,
-        
+
         init() {
             const checkUrl = () => {
                 if (location.href !== this.lastUrl) {
@@ -81,13 +81,13 @@
             };
 
             window.addEventListener('popstate', checkUrl);
-            
+
             const originalPush = history.pushState;
             history.pushState = function() {
                 originalPush.apply(this, arguments);
                 checkUrl();
             };
-            
+
             const originalReplace = history.replaceState;
             history.replaceState = function() {
                 originalReplace.apply(this, arguments);
@@ -134,7 +134,7 @@
                     top: auto !important;
                     bottom: 80px !important;
                     transform: none !important;
-                    z-index: 9998 !important; 
+                    z-index: 9998 !important;
                 }
             `;
             document.head.appendChild(style);
@@ -163,7 +163,7 @@
             }
 
             el.classList.add('xiv-active');
-            
+
             this.glowTimeout = setTimeout(() => {
                 this.hideGlow(position);
             }, CONFIG.SCROLL.BRAKE_DURATION_MS - 50);
@@ -185,7 +185,7 @@
         activeBrakeDirection: null, // 'DOWN' or 'UP' when parked at a boundary
         brakeY: null,               // Exact pixel coordinate to pin the screen during a brake
         brakeTimer: null,           // Reference to the lock timer to allow early cancellation
-        
+
         acknowledgedBottomItem: null,
         acknowledgedTopItem: null,
 
@@ -195,7 +195,7 @@
             window.addEventListener('scroll', () => {
                 if (this.activeBrakeDirection && this.brakeY !== null) {
                     const currentY = window.scrollY;
-                    
+
                     if ((this.activeBrakeDirection === CONFIG.ENUMS.DOWN && currentY < this.brakeY) ||
                         (this.activeBrakeDirection === CONFIG.ENUMS.UP && currentY > this.brakeY)) {
                         this.cancelBrake(); // Natively scrolled away from boundary
@@ -252,7 +252,7 @@
                 Logger.log('Brake shattered by reverse input/SPA change.');
                 UI.hideGlow(this.activeBrakeDirection === CONFIG.ENUMS.DOWN ? CONFIG.ENUMS.POS_BOTTOM : CONFIG.ENUMS.POS_TOP);
                 if (this.brakeTimer) clearTimeout(this.brakeTimer);
-                
+
                 this.activeBrakeDirection = null;
                 this.brakeY = null;
                 this.brakeTimer = null;
@@ -266,7 +266,7 @@
             const eventTarget = event.target;
             if (!eventTarget) return true;
             if (eventTarget.closest(CONFIG.SELECTORS.IGNORE_AREAS)) return false;
-            
+
             const tagName = eventTarget.tagName?.toUpperCase();
             if (tagName === 'INPUT' || tagName === 'TEXTAREA' || eventTarget.isContentEditable) {
                 return false;
@@ -276,8 +276,9 @@
         },
 
         getHeaderOffset() {
-            if (window.location.pathname.includes('/quotes')) {
-                return CONFIG.SCROLL.HEADER_OFFSET_QUOTES;
+            const path = window.location.pathname;
+            if (path.includes('/quotes') || path.includes('/search')) {
+                return CONFIG.SCROLL.HEADER_OFFSET_TALL;
             }
             return CONFIG.SCROLL.HEADER_OFFSET_DEFAULT;
         },
@@ -310,7 +311,7 @@
                 if (directionDown) {
                     if (currentItem.bottom > window.innerHeight + CONFIG.SCROLL.TOLERANCE_PX) {
                         this.acknowledgedBottomItem = null;
-                        return null; 
+                        return null;
                     } else if (this.acknowledgedBottomItem !== currentItem.element) {
                         this.acknowledgedBottomItem = currentItem.element;
                         return CONFIG.ENUMS.BRAKE_BOTTOM;
@@ -329,7 +330,7 @@
                 this.acknowledgedBottomItem = null;
             }
 
-            return directionDown 
+            return directionDown
                 ? rects.find(t => t.top > anchorLine + CONFIG.SCROLL.TOLERANCE_PX)
                 : rects.reverse().find(t => t.top < anchorLine - CONFIG.SCROLL.TOLERANCE_PX);
         },
@@ -344,7 +345,7 @@
 
             // 2. DIRECTIONAL BRAKE CHECK
             if (this.activeBrakeDirection !== null) {
-                if ((this.activeBrakeDirection === CONFIG.ENUMS.DOWN && isDown) || 
+                if ((this.activeBrakeDirection === CONFIG.ENUMS.DOWN && isDown) ||
                     (this.activeBrakeDirection === CONFIG.ENUMS.UP && !isDown)) {
                     event.preventDefault();
                     event.stopPropagation();
@@ -367,16 +368,16 @@
                 // TRUE PHYSICAL BRAKE (Engage)
                 if (target === CONFIG.ENUMS.BRAKE_BOTTOM || target === CONFIG.ENUMS.BRAKE_TOP) {
                     Logger.log(`Braking at boundary of tall element.`);
-                    
+
                     this.activeBrakeDirection = isDown ? CONFIG.ENUMS.DOWN : CONFIG.ENUMS.UP;
                     this.brakeY = window.scrollY;
-                    
+
                     UI.showGlow(isDown ? CONFIG.ENUMS.POS_BOTTOM : CONFIG.ENUMS.POS_TOP, headerOffset);
 
                     this.brakeTimer = setTimeout(() => {
                         this.cancelBrake();
                     }, CONFIG.SCROLL.BRAKE_DURATION_MS);
-                    
+
                     return;
                 }
 
@@ -393,8 +394,8 @@
     // 7. APP BOOTSTRAP
     const App = {
         init() {
-            Logger.log('Initializing Scroll Hijacker v2.2');
-            
+            Logger.log('Initializing Scroll Hijacker v2.3');
+
             SPA.init();
             UI.init();
             SnapEngine.init();
