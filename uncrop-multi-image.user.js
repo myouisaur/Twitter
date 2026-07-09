@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      10.0
+// @version      11.0
 // @description  Displays multi-image posts on X (Twitter) in their full original proportions without cropped edges.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -23,21 +23,28 @@
         window.__xivAspectCache = new Map();
     }
 
-    // 2. CONFIGURATION
+    // 2. CENTRALIZED CONFIGURATION
     const CONFIG = {
         DEBUG: false,
         CACHE: {
-            MAX_SIZE: 500
+            MAX_SIZE: 1500 // Increased for smoother long-session scrolling
         },
         LAYOUT: {
             MAX_HEIGHT_VH: 60,
             FLEX_MULTIPLIER: 10000,
             GAP_PX: 2,
-            MARGIN_TOP_PX: 12
+            MARGIN_TOP_PX: 12,
+            BORDER_RADIUS: 'clamp(8px, 1vw, 14px)',
+            BORDER_COLOR: 'rgba(128, 128, 128, 0.15)',
+            BG_COLOR: 'rgba(128, 128, 128, 0.05)',
+            BG_COLOR_DARK: 'rgba(255, 255, 255, 0.03)',
+            BORDER_COLOR_DARK: 'rgba(255, 255, 255, 0.1)'
         },
         ANIMATION: {
             RESIZE_DURATION_MS: 600,
-            OBSERVER_DELAY_MS: 100
+            OBSERVER_DELAY_MS: 100,
+            STAGGER_DELAY_MS: 60,
+            SLIDE_OFFSET_PX: 20
         },
         SELECTORS: {
             PHOTO: 'div[data-testid="tweetPhoto"]',
@@ -47,9 +54,19 @@
             TEXT_MARKERS: '[data-testid="tweetText"], [data-testid="User-Name"], time'
         },
         CLASSES: {
-            PROCESSED: 'xiv-processed',
             STYLE_ID: 'xiv-uncrop-styles',
-            HIDDEN_ORIGINAL: 'xiv-hidden-original'
+            PROCESSED: 'xiv-processed',
+            PROCESSING: 'xiv-processing',
+            HIDDEN_ORIGINAL: 'xiv-hidden-original',
+            GRID: 'xiv-math-grid',
+            COL: 'xiv-math-col',
+            ROW: 'xiv-math-row',
+            ITEM: 'xiv-math-item',
+            IMG: 'xiv-custom-img',
+            LOADED: 'xiv-loaded',
+            ANIMATING: 'xiv-animating',
+            GRID_HIDDEN: 'xiv-grid-hidden',
+            INSTANT: 'xiv-instant' // Bypass flag for cached items
         }
     };
 
@@ -67,7 +84,6 @@
             if (window.__xivAspectCache.size >= CONFIG.CACHE.MAX_SIZE) {
                 const oldestKey = window.__xivAspectCache.keys().next().value;
                 window.__xivAspectCache.delete(oldestKey);
-                Logger.log('Cache limit reached. Pruned oldest entry.');
             }
             window.__xivAspectCache.set(key, value);
         }
@@ -85,87 +101,89 @@
             } catch (e) {
                 Logger.warn('URL parsing failed for:', url, e);
             }
-            // Fallback if URL constructor fails
             return url.replace(/name=[^&]+/, 'name=orig');
         }
     };
 
-    // 4. APP INITIALIZATION
-    const App = {
+    // 4. VIEWPORT OBSERVER (Solves the "Pop-up" bug)
+    // Ensures animations only trigger when the grid actually enters the user's screen
+    const ViewportObserver = {
+        observer: null,
         init() {
-            Logger.log(`Initializing v${GM_info?.script?.version || '9.4'}`);
-            UI.injectStyles();
-            DOMProcessor.scan(document);
-            Observers.start();
+            this.observer = new IntersectionObserver((entries, obs) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        // Reveal the grid, triggering the CSS staggered slide-up
+                        entry.target.classList.remove(CONFIG.CLASSES.GRID_HIDDEN);
+                        obs.unobserve(entry.target);
+                    }
+                });
+            }, { rootMargin: '100px 0px', threshold: 0.05 });
+        },
+        observe(element) {
+            if (!this.observer) this.init();
+            this.observer.observe(element);
         }
     };
 
-    // 5. UI & STYLING
+    // 5. UI & STYLING (Centralized CSS generation)
     const UI = {
         injectStyles() {
             if (document.getElementById(CONFIG.CLASSES.STYLE_ID)) return;
             const style = document.createElement('style');
             style.id = CONFIG.CLASSES.STYLE_ID;
 
+            const C = CONFIG.CLASSES;
+            const L = CONFIG.LAYOUT;
+            const A = CONFIG.ANIMATION;
+
             style.textContent = `
-                /* ADVANCED ANIMATION STATES */
                 @keyframes xivShimmerPulse {
                     0% { filter: blur(4px) grayscale(30%) brightness(1); opacity: 0.8; }
                     50% { filter: blur(6px) grayscale(40%) brightness(0.9); opacity: 0.6; }
                     100% { filter: blur(4px) grayscale(30%) brightness(1); opacity: 0.8; }
                 }
 
-                .xiv-processing {
+                .${C.PROCESSING} {
                     animation: xivShimmerPulse 1.2s infinite ease-in-out !important;
                     pointer-events: none !important;
                 }
 
-                .xiv-math-grid.xiv-animating {
-                    transition: height ${(CONFIG.ANIMATION.RESIZE_DURATION_MS / 1000).toFixed(1)}s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
-                }
-
-                .xiv-grid-hidden .xiv-math-item {
-                    opacity: 0 !important;
-                    transform: translateY(16px) scale(0.98) !important;
-                }
-
-                /* THE MATHEMATICAL GRID SYSTEM */
-                .xiv-math-grid {
+                /* Grid Foundations */
+                .${C.GRID} {
                     box-sizing: border-box !important;
                     width: 100% !important;
-                    max-width: calc(${CONFIG.LAYOUT.MAX_HEIGHT_VH}vh * var(--grid-aspect, 1)) !important;
-                    max-height: ${CONFIG.LAYOUT.MAX_HEIGHT_VH}vh !important;
+                    max-width: calc(${L.MAX_HEIGHT_VH}vh * var(--grid-aspect, 1)) !important;
+                    max-height: ${L.MAX_HEIGHT_VH}vh !important;
                     aspect-ratio: var(--grid-aspect) !important;
-                    margin-top: ${CONFIG.LAYOUT.MARGIN_TOP_PX}px !important;
-                    margin-left: auto !important;
-                    margin-right: auto !important;
-                    gap: ${CONFIG.LAYOUT.GAP_PX}px !important;
-                    border-radius: clamp(8px, 1vw, 14px) !important;
+                    margin: ${L.MARGIN_TOP_PX}px auto 0 auto !important;
+                    gap: ${L.GAP_PX}px !important;
+                    border-radius: ${L.BORDER_RADIUS} !important;
                     overflow: hidden !important;
-                    border: 1px solid rgba(128, 128, 128, 0.15) !important;
+                    border: 1px solid ${L.BORDER_COLOR} !important;
                     transform-origin: center center !important;
                 }
 
-                .xiv-math-col {
-                    display: flex !important;
-                    flex-direction: column !important;
-                    gap: ${CONFIG.LAYOUT.GAP_PX}px !important;
-                    min-width: 0 !important;
+                .${C.GRID}.${C.ANIMATING} {
+                    transition: height ${(A.RESIZE_DURATION_MS / 1000).toFixed(1)}s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
                 }
 
-                .xiv-math-row {
-                    display: flex !important;
-                    flex-direction: row !important;
-                    gap: ${CONFIG.LAYOUT.GAP_PX}px !important;
-                    min-height: 0 !important;
+                /* Staggered Viewport Reveal (Hidden State) */
+                .${C.GRID_HIDDEN} .${C.ITEM} {
+                    opacity: 0 !important;
+                    transform: translateY(${A.SLIDE_OFFSET_PX}px) scale(0.96) !important;
                 }
 
-                /* ITEM WRAPPERS */
-                .xiv-math-item {
+                /* Layout Structures */
+                .${C.COL} { display: flex !important; flex-direction: column !important; gap: ${L.GAP_PX}px !important; min-width: 0 !important; }
+                .${C.ROW} { display: flex !important; flex-direction: row !important; gap: ${L.GAP_PX}px !important; min-height: 0 !important; }
+
+                /* Items & Images */
+                .${C.ITEM} {
                     box-sizing: border-box !important;
                     position: relative !important;
                     display: flex !important;
-                    background-color: rgba(128, 128, 128, 0.05) !important;
+                    background-color: ${L.BG_COLOR} !important;
                     cursor: pointer !important;
                     min-height: 0 !important;
                     min-width: 0 !important;
@@ -175,19 +193,14 @@
                     transform: translateY(0) scale(1);
                     transition: opacity 0.5s cubic-bezier(0.2, 0.8, 0.2, 1),
                                 transform 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
-                    transition-delay: calc(var(--stagger-idx, 0) * 60ms) !important;
+                    transition-delay: calc(var(--stagger-idx, 0) * ${A.STAGGER_DELAY_MS}ms) !important;
                 }
 
-                .xiv-math-item:hover .xiv-custom-img {
+                .${C.ITEM}:hover .${C.IMG} {
                     opacity: 0.9 !important;
                 }
 
-                .xiv-math-grid:not(.xiv-animating) .xiv-math-item {
-                    transition: none !important;
-                }
-
-                /* IMAGES */
-                .xiv-custom-img {
+                .${C.IMG} {
                     position: absolute !important;
                     top: 0 !important;
                     left: 0 !important;
@@ -201,23 +214,29 @@
                                 transform 0.8s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
                 }
 
-                .xiv-custom-img.xiv-loaded {
+                .${C.IMG}.${C.LOADED} {
                     opacity: 1;
                     transform: scale(1) !important;
                 }
 
-                .xiv-math-grid:not(.xiv-animating) .xiv-custom-img {
-                    transition: opacity 0.2s ease-out !important;
+                /* --- CACHED SCROLL UP BYPASS (Fixes scroll reloading) --- */
+                .${C.INSTANT} .${C.ITEM},
+                .${C.INSTANT} .${C.IMG} {
+                    transition: none !important;
+                    transition-delay: 0s !important;
+                    animation: none !important;
                 }
+                .${C.INSTANT} .${C.IMG} {
+                    opacity: 1 !important;
+                    transform: scale(1) !important;
+                }
+                /* --------------------------------------------------------- */
 
-                /* SAFELY HIDE NATIVE ENGINE */
-                .${CONFIG.CLASSES.HIDDEN_ORIGINAL} {
-                    display: none !important;
-                }
+                .${C.HIDDEN_ORIGINAL} { display: none !important; }
 
                 @media (prefers-color-scheme: dark) {
-                    .xiv-math-grid { border-color: rgba(255, 255, 255, 0.1) !important; }
-                    .xiv-math-item { background-color: rgba(255, 255, 255, 0.03) !important; }
+                    .${C.GRID} { border-color: ${L.BORDER_COLOR_DARK} !important; }
+                    .${C.ITEM} { background-color: ${L.BG_COLOR_DARK} !important; }
                 }
             `;
             document.head.appendChild(style);
@@ -236,6 +255,9 @@
                     aspects = CacheManager.get(cacheKey);
                 } else {
                     const dimensions = await Promise.all(mediaData.map(data => {
+                        if (data.nativeImg && data.nativeImg.naturalWidth > 0) {
+                            return Promise.resolve(data.nativeImg.naturalWidth / data.nativeImg.naturalHeight);
+                        }
                         return new Promise(resolve => {
                             const img = new Image();
                             img.onload = () => resolve(img.naturalWidth / img.naturalHeight);
@@ -248,23 +270,13 @@
                 }
 
                 const grid = document.createElement('div');
-                grid.className = 'xiv-math-grid';
+                grid.className = CONFIG.CLASSES.GRID;
 
-                if (!isCached) {
-                    grid.classList.add('xiv-animating', 'xiv-grid-hidden');
-                    grid.style.height = `${oldHeight}px`;
-                }
-
-                const count = mediaData.length;
-                let finalAspect = 1;
-                const flexMulti = CONFIG.LAYOUT.FLEX_MULTIPLIER;
-
+                // Create individual photo item wrapper
                 const createItem = (data, flexVal, index) => {
                     const wrapper = document.createElement('div');
-                    wrapper.className = 'xiv-math-item';
-
-                    // Flex scaled up to prevent cropping / visual collapse
-                    wrapper.style.flex = `${flexVal * flexMulti} 1 0%`;
+                    wrapper.className = CONFIG.CLASSES.ITEM;
+                    wrapper.style.flex = `${flexVal * CONFIG.LAYOUT.FLEX_MULTIPLIER} 1 0%`;
                     wrapper.style.setProperty('--stagger-idx', index);
                     wrapper.setAttribute('role', 'button');
                     wrapper.setAttribute('tabindex', '0');
@@ -272,12 +284,14 @@
                     const img = document.createElement('img');
                     img.src = data.src;
                     img.alt = data.alt || '';
-                    img.className = 'xiv-custom-img';
+                    img.className = CONFIG.CLASSES.IMG;
                     img.setAttribute('loading', 'lazy');
                     img.setAttribute('decoding', 'async');
 
-                    const setLoaded = () => img.classList.add('xiv-loaded');
-                    if (img.complete && img.naturalHeight !== 0) {
+                    const setLoaded = () => img.classList.add(CONFIG.CLASSES.LOADED);
+
+                    // If cached, bypass the delayed loading animation
+                    if (isCached || (img.complete && img.naturalHeight !== 0)) {
                         setLoaded();
                     } else {
                         img.onload = setLoaded;
@@ -292,7 +306,10 @@
                     return wrapper;
                 };
 
-                // PURE MATHEMATICAL LAYOUT TESSELATION
+                const count = mediaData.length;
+                let finalAspect = 1;
+
+                // Centralized layout application
                 if (count === 1) {
                     finalAspect = aspects[0];
                     grid.style.display = 'flex';
@@ -302,7 +319,6 @@
                     finalAspect = aspects[0] + aspects[1];
                     grid.style.display = 'flex';
                     grid.style.flexDirection = 'row';
-
                     grid.appendChild(createItem(mediaData[0], aspects[0], 0));
                     grid.appendChild(createItem(mediaData[1], aspects[1], 1));
                 }
@@ -311,11 +327,11 @@
                     finalAspect = aspects[0] + (1 / rSum);
                     grid.style.display = 'flex';
                     grid.style.flexDirection = 'row';
-
                     grid.appendChild(createItem(mediaData[0], aspects[0] * rSum, 0));
+
                     const rightCol = document.createElement('div');
-                    rightCol.className = 'xiv-math-col';
-                    rightCol.style.flex = `${flexMulti} 1 0%`;
+                    rightCol.className = CONFIG.CLASSES.COL;
+                    rightCol.style.flex = `${CONFIG.LAYOUT.FLEX_MULTIPLIER} 1 0%`;
                     rightCol.appendChild(createItem(mediaData[1], 1 / aspects[1], 1));
                     rightCol.appendChild(createItem(mediaData[2], 1 / aspects[2], 2));
                     grid.appendChild(rightCol);
@@ -328,14 +344,14 @@
                     grid.style.flexDirection = 'column';
 
                     const row1 = document.createElement('div');
-                    row1.className = 'xiv-math-row';
-                    row1.style.flex = `${(1 / r1) * flexMulti} 1 0%`;
+                    row1.className = CONFIG.CLASSES.ROW;
+                    row1.style.flex = `${(1 / r1) * CONFIG.LAYOUT.FLEX_MULTIPLIER} 1 0%`;
                     row1.appendChild(createItem(mediaData[0], aspects[0], 0));
                     row1.appendChild(createItem(mediaData[1], aspects[1], 1));
 
                     const row2 = document.createElement('div');
-                    row2.className = 'xiv-math-row';
-                    row2.style.flex = `${(1 / r2) * flexMulti} 1 0%`;
+                    row2.className = CONFIG.CLASSES.ROW;
+                    row2.style.flex = `${(1 / r2) * CONFIG.LAYOUT.FLEX_MULTIPLIER} 1 0%`;
                     row2.appendChild(createItem(mediaData[2], aspects[2], 2));
                     row2.appendChild(createItem(mediaData[3], aspects[3], 3));
 
@@ -344,29 +360,37 @@
                 }
 
                 grid.style.setProperty('--grid-aspect', finalAspect);
-                mediaRoot.classList.remove('xiv-processing');
+                mediaRoot.classList.remove(CONFIG.CLASSES.PROCESSING);
                 mediaRoot.classList.add(CONFIG.CLASSES.HIDDEN_ORIGINAL);
 
                 if (mediaRoot.parentNode) {
                     mediaRoot.parentNode.insertBefore(grid, mediaRoot.nextSibling);
                 }
 
+                // ANIMATION vs INSTANT RENDER DECISION
                 if (!isCached) {
+                    // Start in a hidden state, ready for ViewportObserver to reveal
+                    grid.classList.add(CONFIG.CLASSES.ANIMATING, CONFIG.CLASSES.GRID_HIDDEN);
+                    grid.style.height = `${oldHeight}px`;
+
                     const viewportVh = window.innerHeight * (CONFIG.LAYOUT.MAX_HEIGHT_VH / 100);
                     const targetHeight = grid.offsetWidth > 0 ? Math.min(grid.offsetWidth / finalAspect, viewportVh) : oldHeight;
 
                     requestAnimationFrame(() => {
-                        grid.classList.remove('xiv-grid-hidden');
                         grid.style.height = `${targetHeight}px`;
-
                         setTimeout(() => {
-                            grid.classList.remove('xiv-animating');
+                            grid.classList.remove(CONFIG.CLASSES.ANIMATING);
                             grid.style.height = '';
                         }, CONFIG.ANIMATION.RESIZE_DURATION_MS);
                     });
+
+                    // Defer the fade-in until the user actually scrolls to the grid
+                    ViewportObserver.observe(grid);
+                } else {
+                    // Render instantly without any delays for smooth up-scrolling
+                    grid.classList.add(CONFIG.CLASSES.INSTANT);
                 }
 
-                Logger.log(`Processed layout for cache key: ${cacheKey}`);
             } catch (error) {
                 Logger.error('Failed to process dimensions:', error);
             }
@@ -376,23 +400,18 @@
     // 7. DOM PROCESSING
     const DOMProcessor = {
         scan(scopeNode = document) {
-            // Optimization: Query only within the modified scope when possible
-            const unprocessedItems = scopeNode.querySelectorAll(`${CONFIG.SELECTORS.PHOTO}:not(.${CONFIG.CLASSES.PROCESSED})`);
+            const unprocessedItems = scopeNode.querySelectorAll(
+                `${CONFIG.SELECTORS.PHOTO}:not(.${CONFIG.CLASSES.PROCESSED})`
+            );
             if (unprocessedItems.length === 0) return;
 
             const roots = new Set();
-
             unprocessedItems.forEach(item => {
                 if (item.classList.contains(CONFIG.CLASSES.PROCESSED)) return;
-                if (item.closest('.xiv-math-grid') || item.closest(`.${CONFIG.CLASSES.HIDDEN_ORIGINAL}`)) {
-                    item.classList.add(CONFIG.CLASSES.PROCESSED);
-                    return;
-                }
 
                 let current = item.parentElement;
                 let mediaRoot = item;
 
-                // Robust Traversal: Look for Article tag OR Tweet wrapper as boundaries
                 while (current &&
                        current.tagName !== CONFIG.SELECTORS.ARTICLE_TAG &&
                        !current.matches(CONFIG.SELECTORS.TWEET_WRAPPER)) {
@@ -403,64 +422,58 @@
                     mediaRoot = current;
                     current = current.parentElement;
                 }
-                roots.add(mediaRoot);
+
+                if (!mediaRoot.classList.contains(CONFIG.CLASSES.HIDDEN_ORIGINAL) &&
+                    !mediaRoot.classList.contains(CONFIG.CLASSES.PROCESSING)) {
+                    roots.add(mediaRoot);
+                }
             });
 
             roots.forEach(mediaRoot => {
-                if (mediaRoot.classList.contains(CONFIG.CLASSES.HIDDEN_ORIGINAL) || mediaRoot.classList.contains('xiv-processing')) return;
+                const allPhotos = mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO);
 
-                // NATIVE QUOTE TWEET SAFEGUARD:
-                // If Twitter placed the media side-by-side with text (row layout),
-                // it is a native "compressed" quote tweet. Leave it entirely alone.
-                if (mediaRoot.parentElement) {
+                if (mediaRoot.parentElement && allPhotos.length === 1) {
                     const parentStyle = window.getComputedStyle(mediaRoot.parentElement);
                     if (parentStyle.flexDirection === 'row') {
-                        const allPhotos = mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO);
-                        allPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
-                        Logger.log('Ignored native row layout Quote Tweet.');
-                        return;
+                        const hasSiblings = Array.from(mediaRoot.parentElement.children).length > 1;
+                        if (hasSiblings) {
+                            allPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
+                            return;
+                        }
                     }
                 }
 
                 if (mediaRoot.querySelector(CONFIG.SELECTORS.VIDEO_OR_GIF)) {
-                    const allPhotos = mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO);
                     allPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
                     return;
                 }
 
-                const groupItems = Array.from(mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO));
+                const groupItems = Array.from(allPhotos);
                 if (groupItems.length === 0) return;
 
                 const isReady = groupItems.every(item => {
                     const img = item.querySelector('img');
-                    return img && img.src;
+                    return img && img.src && !img.src.includes('blob:');
                 });
 
                 if (!isReady) return;
 
                 const mediaData = groupItems.map(item => {
-                    const anchor = item.closest('a');
-                    if (!anchor || !/\/photo\//i.test(anchor.href)) return null;
                     const img = item.querySelector('img');
-                    const src = img ? Utils.getHighResSrc(img.src) : null;
+                    const src = Utils.getHighResSrc(img.src);
+                    const anchor = item.closest('a') || item;
                     return {
                         originalAnchor: anchor,
                         src: src,
-                        alt: img ? img.alt : ''
+                        alt: img.alt || '',
+                        nativeImg: img
                     };
-                }).filter(data => data && data.src);
-
-                if (mediaData.length === 0) {
-                    groupItems.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
-                    return;
-                }
+                });
 
                 const cacheKey = mediaData.map(d => d.src.split('?')[0]).join('|');
-                groupItems.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
 
-                if (!CacheManager.has(cacheKey)) {
-                    mediaRoot.classList.add('xiv-processing');
-                }
+                groupItems.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
+                mediaRoot.classList.add(CONFIG.CLASSES.PROCESSING);
 
                 MathEngine.process(mediaData, mediaRoot, cacheKey);
             });
@@ -478,19 +491,26 @@
                 let fullScanRequired = false;
 
                 for (let i = 0; i < mutations.length; i++) {
-                    const addedNodes = mutations[i].addedNodes;
-                    for (let j = 0; j < addedNodes.length; j++) {
-                        const node = addedNodes[j];
+                    const mutation = mutations[i];
 
-                        if (node.nodeType === 1) {
-                            if (node.tagName === CONFIG.SELECTORS.ARTICLE_TAG ||
-                                (node.matches && node.matches(CONFIG.SELECTORS.PHOTO))) {
-                                // Specific container added, target scan
-                                scopeNodes.add(node);
-                            } else if (node.querySelector(CONFIG.SELECTORS.PHOTO)) {
-                                // Broad update, fallback to full scan
-                                fullScanRequired = true;
-                                break;
+                    if (mutation.type === 'attributes' && mutation.target.tagName === 'IMG') {
+                        if (mutation.target.closest(CONFIG.SELECTORS.PHOTO)) {
+                            fullScanRequired = true;
+                            break;
+                        }
+                    }
+                    else if (mutation.type === 'childList') {
+                        const addedNodes = mutation.addedNodes;
+                        for (let j = 0; j < addedNodes.length; j++) {
+                            const node = addedNodes[j];
+                            if (node.nodeType === 1) {
+                                if (node.tagName === CONFIG.SELECTORS.ARTICLE_TAG ||
+                                    (node.matches && node.matches(CONFIG.SELECTORS.PHOTO))) {
+                                    scopeNodes.add(node);
+                                } else if (node.querySelector(CONFIG.SELECTORS.PHOTO)) {
+                                    fullScanRequired = true;
+                                    break;
+                                }
                             }
                         }
                     }
@@ -511,11 +531,25 @@
                 }
             });
 
-            this.observer.observe(document.body, { childList: true, subtree: true });
+            this.observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['src']
+            });
         }
     };
 
-    // 9. BOOTSTRAP
+    // 9. APP BOOTSTRAP
+    const App = {
+        init() {
+            Logger.log(`Initializing v${GM_info?.script?.version || '11.0'}`);
+            UI.injectStyles();
+            DOMProcessor.scan(document);
+            Observers.start();
+        }
+    };
+
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', App.init);
     } else {
