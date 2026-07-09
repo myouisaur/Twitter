@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      11.2
+// @version      11.3
 // @description  Displays multi-image posts on X (Twitter) in their full original proportions without cropped edges.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -425,14 +425,19 @@
             roots.forEach(mediaRoot => {
                 const allPhotos = mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO);
 
-                // NATIVE QUOTE TWEET SAFEGUARD (Restored to original logic)
-                if (mediaRoot.parentElement) {
-                    const parentStyle = window.getComputedStyle(mediaRoot.parentElement);
-                    if (parentStyle.flexDirection === 'row') {
+                // --- STRUCTURAL QUOTE TWEET SAFEGUARD ---
+                // Rule: If the tweet has primary parent media, DO NOT uncrop the secondary quote media.
+                const tweetWrapper = mediaRoot.closest(CONFIG.SELECTORS.TWEET_WRAPPER);
+                if (tweetWrapper) {
+                    const firstMediaInTweet = tweetWrapper.querySelector(`${CONFIG.SELECTORS.PHOTO}, ${CONFIG.SELECTORS.VIDEO_OR_GIF}`);
+                    // If the first piece of media in this tweet is outside our current mediaRoot,
+                    // it means this mediaRoot is a quoted tweet secondary block. Leave it compressed!
+                    if (firstMediaInTweet && !mediaRoot.contains(firstMediaInTweet)) {
                         allPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
                         return;
                     }
                 }
+                // ----------------------------------------
 
                 if (mediaRoot.querySelector(CONFIG.SELECTORS.VIDEO_OR_GIF)) {
                     allPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
@@ -534,7 +539,7 @@
     // 9. APP BOOTSTRAP
     const App = {
         init() {
-            Logger.log(`Initializing v${GM_info?.script?.version || '11.2'}`);
+            Logger.log(`Initializing v${GM_info?.script?.version || '11.3'}`);
             UI.injectStyles();
             DOMProcessor.scan(document);
             Observers.start();
