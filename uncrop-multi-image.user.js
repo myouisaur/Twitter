@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      11.0
+// @version      11.2
 // @description  Displays multi-image posts on X (Twitter) in their full original proportions without cropped edges.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -27,7 +27,7 @@
     const CONFIG = {
         DEBUG: false,
         CACHE: {
-            MAX_SIZE: 1500 // Increased for smoother long-session scrolling
+            MAX_SIZE: 1500
         },
         LAYOUT: {
             MAX_HEIGHT_VH: 60,
@@ -66,7 +66,7 @@
             LOADED: 'xiv-loaded',
             ANIMATING: 'xiv-animating',
             GRID_HIDDEN: 'xiv-grid-hidden',
-            INSTANT: 'xiv-instant' // Bypass flag for cached items
+            INSTANT: 'xiv-instant'
         }
     };
 
@@ -106,14 +106,12 @@
     };
 
     // 4. VIEWPORT OBSERVER (Solves the "Pop-up" bug)
-    // Ensures animations only trigger when the grid actually enters the user's screen
     const ViewportObserver = {
         observer: null,
         init() {
             this.observer = new IntersectionObserver((entries, obs) => {
                 entries.forEach(entry => {
                     if (entry.isIntersecting) {
-                        // Reveal the grid, triggering the CSS staggered slide-up
                         entry.target.classList.remove(CONFIG.CLASSES.GRID_HIDDEN);
                         obs.unobserve(entry.target);
                     }
@@ -126,7 +124,7 @@
         }
     };
 
-    // 5. UI & STYLING (Centralized CSS generation)
+    // 5. UI & STYLING
     const UI = {
         injectStyles() {
             if (document.getElementById(CONFIG.CLASSES.STYLE_ID)) return;
@@ -149,7 +147,6 @@
                     pointer-events: none !important;
                 }
 
-                /* Grid Foundations */
                 .${C.GRID} {
                     box-sizing: border-box !important;
                     width: 100% !important;
@@ -168,17 +165,14 @@
                     transition: height ${(A.RESIZE_DURATION_MS / 1000).toFixed(1)}s cubic-bezier(0.2, 0.8, 0.2, 1) !important;
                 }
 
-                /* Staggered Viewport Reveal (Hidden State) */
                 .${C.GRID_HIDDEN} .${C.ITEM} {
                     opacity: 0 !important;
                     transform: translateY(${A.SLIDE_OFFSET_PX}px) scale(0.96) !important;
                 }
 
-                /* Layout Structures */
                 .${C.COL} { display: flex !important; flex-direction: column !important; gap: ${L.GAP_PX}px !important; min-width: 0 !important; }
                 .${C.ROW} { display: flex !important; flex-direction: row !important; gap: ${L.GAP_PX}px !important; min-height: 0 !important; }
 
-                /* Items & Images */
                 .${C.ITEM} {
                     box-sizing: border-box !important;
                     position: relative !important;
@@ -200,6 +194,10 @@
                     opacity: 0.9 !important;
                 }
 
+                .${C.GRID}:not(.${C.ANIMATING}) .${C.ITEM} {
+                    transition: none !important;
+                }
+
                 .${C.IMG} {
                     position: absolute !important;
                     top: 0 !important;
@@ -219,7 +217,10 @@
                     transform: scale(1) !important;
                 }
 
-                /* --- CACHED SCROLL UP BYPASS (Fixes scroll reloading) --- */
+                .${C.GRID}:not(.${C.ANIMATING}) .${C.IMG} {
+                    transition: opacity 0.2s ease-out !important;
+                }
+
                 .${C.INSTANT} .${C.ITEM},
                 .${C.INSTANT} .${C.IMG} {
                     transition: none !important;
@@ -230,7 +231,6 @@
                     opacity: 1 !important;
                     transform: scale(1) !important;
                 }
-                /* --------------------------------------------------------- */
 
                 .${C.HIDDEN_ORIGINAL} { display: none !important; }
 
@@ -272,7 +272,6 @@
                 const grid = document.createElement('div');
                 grid.className = CONFIG.CLASSES.GRID;
 
-                // Create individual photo item wrapper
                 const createItem = (data, flexVal, index) => {
                     const wrapper = document.createElement('div');
                     wrapper.className = CONFIG.CLASSES.ITEM;
@@ -290,7 +289,6 @@
 
                     const setLoaded = () => img.classList.add(CONFIG.CLASSES.LOADED);
 
-                    // If cached, bypass the delayed loading animation
                     if (isCached || (img.complete && img.naturalHeight !== 0)) {
                         setLoaded();
                     } else {
@@ -309,7 +307,6 @@
                 const count = mediaData.length;
                 let finalAspect = 1;
 
-                // Centralized layout application
                 if (count === 1) {
                     finalAspect = aspects[0];
                     grid.style.display = 'flex';
@@ -367,9 +364,7 @@
                     mediaRoot.parentNode.insertBefore(grid, mediaRoot.nextSibling);
                 }
 
-                // ANIMATION vs INSTANT RENDER DECISION
                 if (!isCached) {
-                    // Start in a hidden state, ready for ViewportObserver to reveal
                     grid.classList.add(CONFIG.CLASSES.ANIMATING, CONFIG.CLASSES.GRID_HIDDEN);
                     grid.style.height = `${oldHeight}px`;
 
@@ -384,10 +379,8 @@
                         }, CONFIG.ANIMATION.RESIZE_DURATION_MS);
                     });
 
-                    // Defer the fade-in until the user actually scrolls to the grid
                     ViewportObserver.observe(grid);
                 } else {
-                    // Render instantly without any delays for smooth up-scrolling
                     grid.classList.add(CONFIG.CLASSES.INSTANT);
                 }
 
@@ -432,14 +425,12 @@
             roots.forEach(mediaRoot => {
                 const allPhotos = mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO);
 
-                if (mediaRoot.parentElement && allPhotos.length === 1) {
+                // NATIVE QUOTE TWEET SAFEGUARD (Restored to original logic)
+                if (mediaRoot.parentElement) {
                     const parentStyle = window.getComputedStyle(mediaRoot.parentElement);
                     if (parentStyle.flexDirection === 'row') {
-                        const hasSiblings = Array.from(mediaRoot.parentElement.children).length > 1;
-                        if (hasSiblings) {
-                            allPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
-                            return;
-                        }
+                        allPhotos.forEach(p => p.classList.add(CONFIG.CLASSES.PROCESSED));
+                        return;
                     }
                 }
 
@@ -543,7 +534,7 @@
     // 9. APP BOOTSTRAP
     const App = {
         init() {
-            Logger.log(`Initializing v${GM_info?.script?.version || '11.0'}`);
+            Logger.log(`Initializing v${GM_info?.script?.version || '11.2'}`);
             UI.injectStyles();
             DOMProcessor.scan(document);
             Observers.start();
