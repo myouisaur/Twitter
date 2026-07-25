@@ -2,13 +2,16 @@
 // @name         [Twitter] Image Zoom on Hover
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      4.11
-// @description  Advanced on-hover image zoom for a smoother browsing experience, with a robust and stylized toggle.
+// @version      5.6
+// @description  Automatically enlarges images and videos on hover for a seamless browsing experience.
 // @author       Xiv
 // @match        *://*.twitter.com/*
 // @match        *://*.x.com/*
-// @noframes
 // @grant        GM_addStyle
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-idle
+// @noframes
 // @updateURL    https://myouisaur.github.io/Twitter/zoom-on-hover.user.js
 // @downloadURL  https://myouisaur.github.io/Twitter/zoom-on-hover.user.js
 // ==/UserScript==
@@ -17,24 +20,31 @@
     'use strict';
 
     // --- Duplicate Execution Guard ---
-    if (window.__tmImageZoomInitialized) return;
-    window.__tmImageZoomInitialized = true;
+    if (window.__xivImageZoomInitialized) return;
+    window.__xivImageZoomInitialized = true;
 
     // --- Configuration ---
     const CONFIG = {
-        FALLBACK_COLOR: '#ffffff',
-        CSS_VAR: '--tm-img-accent',
-        FADE_DURATION_MS: 250,
-        HOVER_DELAY_MS: 120,
-        HIDE_DELAY_MS: 100,
-        STORAGE_KEY: 'tm-img-hover-enabled',
-        THEME_STORAGE_KEY: 'tm-img-theme-color',
-        TOGGLE_HOTKEY: 'Control',
-        Z_INDEX: 99999,
-        THEMES: {
-            'rgb(29,155,240)': '#1d9bf0', 'rgb(255,212,0)': '#ffd400', 'rgb(249,24,128)': '#f91880',
-            'rgb(120,86,255)': '#7856ff', 'rgb(255,122,0)': '#ff7a00', 'rgb(0,186,124)': '#00ba7c'
+        // Feature Flags
+        DEBUG: false,
+
+        // Storage Keys
+        STORAGE_KEY: 'xiv_settings',
+
+        // Selectors
+        SELECTORS: {
+            REACT_ROOT: '#react-root',
+            NAV: '[role="navigation"]',
+            MORE_MENU: '[data-testid="AppTabBar_More_Menu"]',
+            EXPLORE_LINK: '[data-testid="AppTabBar_Explore_Link"]',
+            NEW_TWEET_BTN: '[data-testid="SideNav_NewTweet_Button"]',
+            UNREAD_BADGE: '[aria-label*="unread"]',
+            VIDEO_COMP: '[data-testid="videoComponent"]',
+            PHOTO_COMP: '[data-testid="tweetPhoto"]',
+            PHOTO_VIEWER: '[data-testid="photoViewer"]'
         },
+
+        // CSS Classes (Dynamically Synced, Defaults Provided)
         CLASSES: {
             BTN: "css-175oi2r r-6koalj r-eqz5dr r-16y2uox r-1habvwh r-cnw61z r-13qz1uu r-1loqt21 r-1ny4l3l",
             FLEX_DIV: "css-175oi2r r-sdzlij r-dnmrzs r-1awozwy r-18u37iz r-1777fci r-q81ovl r-o7ynqc r-6416eg",
@@ -42,12 +52,56 @@
             SVG: "img-icon r-4qtqp9 r-yyyyoo r-dnmrzs r-bnwqim r-lrvibr r-m6rgpd r-1nao33i r-lwhw9o r-cnnz9e",
             LABEL_DIV: "css-146c3p1 r-dnmrzs r-1udh08x r-1udbk01 r-3s2u2q r-1ttztb7 r-qvutc0 r-1qd0xha r-1b6yd1w r-7ptqe7 r-16dba41 r-1wbh5a2 r-9p5ork r-1tfrt9a r-bcqeeo",
             SPAN: "css-1jxf684 r-bcqeeo r-1ttztb7 r-qvutc0 r-poiln3"
-        }
+        },
+
+        // Styling
+        STYLE: {
+            FALLBACK_COLOR: '#ffffff',
+            CSS_VAR: '--xiv-img-accent',
+            Z_INDEX: 99999,
+            THEMES: {
+                'rgb(29,155,240)': '#1d9bf0', 'rgb(255,212,0)': '#ffd400', 'rgb(249,24,128)': '#f91880',
+                'rgb(120,86,255)': '#7856ff', 'rgb(255,122,0)': '#ff7a00', 'rgb(0,186,124)': '#00ba7c'
+            }
+        },
+
+        // Timing Defaults
+        TIMING: {
+            FADE_DURATION_MS: 250,
+            DEFAULT_HOVER_DELAY: 120,
+            DEFAULT_HIDE_DELAY: 100
+        },
+
+        // Keyboard
+        TOGGLE_HOTKEY: 'Control'
     };
 
-    // --- State ---
-    let storedState = localStorage.getItem(CONFIG.STORAGE_KEY);
-    let hoverEnabled = storedState === null ? true : (storedState === 'true');
+    // --- State Management ---
+    const defaultSettings = {
+        enabled: true,
+        themeColor: null,
+        hoverDelay: CONFIG.TIMING.DEFAULT_HOVER_DELAY,
+        hideDelay: CONFIG.TIMING.DEFAULT_HIDE_DELAY
+    };
+
+    let settings = { ...defaultSettings };
+    try {
+        const stored = GM_getValue(CONFIG.STORAGE_KEY);
+        if (stored && typeof stored === 'object') {
+            settings = { ...settings, ...stored };
+        }
+    } catch (e) {
+        log('Failed to parse stored settings, using defaults.', e);
+    }
+
+    function saveSettings() {
+        try {
+            GM_setValue(CONFIG.STORAGE_KEY, settings);
+        } catch (e) {
+            log('Failed to save settings.', e);
+        }
+    }
+
     let currentImgUrl = null;
     let showTimer = null;
     let hideTimer = null;
@@ -55,14 +109,22 @@
     let loadingCleanupTimer = null;
     let currentHoverTarget = null;
     let isDismissedUntilMove = false;
+    let scrollListenersAttached = false;
     let lastMouseX = 0;
     let lastMouseY = 0;
-    let cachedThemeColor = localStorage.getItem(CONFIG.THEME_STORAGE_KEY) || null;
     const popupEl = document.createElement('div');
 
-    document.documentElement.style.setProperty(CONFIG.CSS_VAR, cachedThemeColor || CONFIG.FALLBACK_COLOR);
+    document.documentElement.style.setProperty(CONFIG.STYLE.CSS_VAR, settings.themeColor || CONFIG.STYLE.FALLBACK_COLOR);
 
     // --- Utilities ---
+    function log(msg, ...args) {
+        if (CONFIG.DEBUG) {
+            console.log(`[Twitter Image Zoom][UI] ${msg}`, ...args);
+        }
+    }
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
     function createElement(tag, attrs = {}, styles = {}, text = null) {
         const el = document.createElement(tag);
         for (const [key, value] of Object.entries(attrs)) {
@@ -95,7 +157,7 @@
     function resolveMediaTarget(target) {
         if (!target) return null;
         if (target.tagName !== 'IMG' && target.tagName !== 'VIDEO') {
-            const container = target.closest('[data-testid="videoComponent"], [data-testid="tweetPhoto"]');
+            const container = target.closest(`${CONFIG.SELECTORS.VIDEO_COMP}, ${CONFIG.SELECTORS.PHOTO_COMP}`);
             if (container) return container.querySelector('video, img') || target;
         }
         return target;
@@ -103,9 +165,12 @@
 
     // --- Dynamic Class Extraction ---
     function syncDynamicClasses() {
-        const template = document.querySelector('[data-testid="AppTabBar_More_Menu"]') ||
-                         document.querySelector('[data-testid="AppTabBar_Explore_Link"]');
-        if (!template) return false;
+        const template = document.querySelector(CONFIG.SELECTORS.MORE_MENU) ||
+                         document.querySelector(CONFIG.SELECTORS.EXPLORE_LINK);
+        if (!template) {
+            log('Could not find template element to sync dynamic classes.');
+            return false;
+        }
 
         try {
             CONFIG.CLASSES.BTN = template.className;
@@ -125,6 +190,7 @@
 
             return true;
         } catch (e) {
+            log('syncDynamicClasses failed during extraction:', e);
             return false;
         }
     }
@@ -133,28 +199,29 @@
     function updateThemeColor() {
         let foundColor = null;
         const bgElements = [
-            ...document.querySelectorAll('[data-testid="SideNav_NewTweet_Button"], [data-testid="SideNav_NewTweet_Button"] *'),
-            ...document.querySelectorAll('[aria-label*="unread"], [aria-label*="unread"] *')
+            ...document.querySelectorAll(`${CONFIG.SELECTORS.NEW_TWEET_BTN}, ${CONFIG.SELECTORS.NEW_TWEET_BTN} *`),
+            ...document.querySelectorAll(`${CONFIG.SELECTORS.UNREAD_BADGE}, ${CONFIG.SELECTORS.UNREAD_BADGE} *`)
         ];
 
         for (const el of bgElements) {
             const bg = window.getComputedStyle(el).backgroundColor.replace(/\s/g, '');
-            if (CONFIG.THEMES[bg]) { foundColor = CONFIG.THEMES[bg]; break; }
+            if (CONFIG.STYLE.THEMES[bg]) { foundColor = CONFIG.STYLE.THEMES[bg]; break; }
         }
 
         if (!foundColor) {
-            const navElements = document.querySelectorAll('[role="navigation"] svg');
+            const navElements = document.querySelectorAll(`${CONFIG.SELECTORS.NAV} svg`);
             for (const el of navElements) {
                 const color = window.getComputedStyle(el).color.replace(/\s/g, '');
-                if (CONFIG.THEMES[color]) { foundColor = CONFIG.THEMES[color]; break; }
+                if (CONFIG.STYLE.THEMES[color]) { foundColor = CONFIG.STYLE.THEMES[color]; break; }
             }
         }
 
-        if (foundColor && foundColor !== cachedThemeColor) {
-            cachedThemeColor = foundColor;
-            localStorage.setItem(CONFIG.THEME_STORAGE_KEY, foundColor);
-            document.documentElement.style.setProperty(CONFIG.CSS_VAR, foundColor);
-            updateSidebarToggleUI();
+        if (foundColor && foundColor !== settings.themeColor) {
+            settings.themeColor = foundColor;
+            saveSettings();
+            document.documentElement.style.setProperty(CONFIG.STYLE.CSS_VAR, foundColor);
+            const btn = document.getElementById('xiv-img-sidebar-toggle');
+            if (btn && settings.enabled) btn.classList.add('xiv-active');
         }
     }
     const debouncedUpdateThemeColor = debounce(updateThemeColor, 200);
@@ -162,85 +229,155 @@
     // --- Styles Injection ---
     function injectStyles() {
         GM_addStyle(`
-            .tm-img-zoom-toggle-btn .tm-inner-svg { transition: color 0.2s ease; }
-            .tm-img-zoom-toggle-btn.tm-active .tm-inner-svg { color: var(${CONFIG.CSS_VAR}); }
+            .xiv-img-zoom-toggle-btn .xiv-inner-svg { transition: color 0.2s ease; }
+            .xiv-img-zoom-toggle-btn.xiv-active .xiv-inner-svg { color: var(${CONFIG.STYLE.CSS_VAR}); }
 
-            .tm-img-zoom-toggle-btn .tm-switch-container {
-                position: relative; width: 7.5rem; height: 2.2rem;
-                flex-shrink: 0; cursor: pointer; display: inline-block; vertical-align: middle;
+            /* --- Mask Architecture --- */
+            .xiv-img-zoom-toggle-btn .xiv-switch-mask {
+                position: relative;
+                width: 8.0rem; /* Compact resting state */
+                height: 2.2rem;
+                flex-shrink: 0;
+                cursor: pointer;
+                display: inline-block;
+                vertical-align: middle;
+                border-radius: 2rem;
+                overflow: hidden;
+                background-color: #333;
+                /* Synced timing with inner container */
+                transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
             }
-            .tm-img-zoom-toggle-btn .tm-switch-track {
+
+            .xiv-switch-mask.xiv-anim-elongated {
+                width: 10.4rem; /* Expanded transition state */
+            }
+
+            .xiv-switch-mask.xiv-state-on {
+                width: 8.0rem; /* Returns to compact */
+            }
+
+            /* --- Inner Translating Container --- */
+            .xiv-img-zoom-toggle-btn .xiv-switch-container {
+                position: absolute;
+                top: 0;
+                left: 0;
+                width: 10.4rem;
+                height: 2.2rem;
+                /* Synced timing with mask width */
+                transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+                transform: translateX(0); /* Anchor left */
+            }
+
+            .xiv-switch-mask.xiv-state-on .xiv-switch-container {
+                /* Pulls the 10.4 container left by 2.4 inside an 8.0 mask */
+                /* Visually pins the right edge of the inner container to the mask's right edge */
+                transform: translateX(-2.4rem);
+            }
+
+            .xiv-switch-mask.xiv-anim-elongated .xiv-switch-container {
+                transform: translateX(0);
+            }
+
+            /* --- Wipe Tracks --- */
+            .xiv-track-base, .xiv-track-overlay {
                 position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-                border-radius: 2rem; background-color: #333; transition: background-color 0.25s ease;
+                display: flex; align-items: center;
             }
-            .tm-img-zoom-toggle-btn.tm-active .tm-switch-track {
-                background-color: var(${CONFIG.CSS_VAR});
+            .xiv-track-base {
+                background-color: #333; z-index: 0;
+            }
+            .xiv-track-overlay {
+                background-color: var(${CONFIG.STYLE.CSS_VAR}); z-index: 1;
+                clip-path: inset(0 100% 0 0);
+                transition: clip-path 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+            }
+            .xiv-img-zoom-toggle-btn.xiv-active .xiv-track-overlay {
+                clip-path: inset(0 0 0 0);
             }
 
-            .tm-img-zoom-toggle-btn .tm-switch-text {
-                position: absolute; top: 50%; transform: translateY(-50%);
-                color: #fff; font-family: inherit; font-size: 0.85rem; font-weight: 700;
-                pointer-events: none; user-select: none; transition: opacity 0.25s ease; white-space: nowrap;
+            /* --- Dynamic Text Positioning --- */
+            .xiv-switch-text {
+                position: absolute; left: 3.2rem; /* The shared central anchor point for the transition */
+                color: #fff; font-family: inherit; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.05em;
+                pointer-events: none; user-select: none; white-space: nowrap;
+                transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+                transform: translateX(0); /* Aligned during elongation */
             }
-            .tm-switch-text-on { left: 0.9rem; opacity: 0; }
-            .tm-switch-text-off { right: 0.9rem; opacity: 1; }
-            .tm-img-zoom-toggle-btn.tm-active .tm-switch-text-on { opacity: 1; }
-            .tm-img-zoom-toggle-btn.tm-active .tm-switch-text-off { opacity: 0; }
 
-            .tm-img-zoom-toggle-btn .tm-switch-thumb {
+            /* Resting OFF: Slide left deeper to account for 'ZOOM OFF' width */
+            .xiv-img-zoom-toggle-btn:not(.xiv-active) .xiv-switch-mask:not(.xiv-anim-elongated) .xiv-text-off {
+                transform: translateX(-0.75rem);
+            }
+
+            /* Resting ON: Slide right into the free space */
+            .xiv-img-zoom-toggle-btn.xiv-active .xiv-switch-mask:not(.xiv-anim-elongated) .xiv-text-on {
+                transform: translateX(0.4rem);
+            }
+
+            /* --- Thumb Elements --- */
+            .xiv-img-zoom-toggle-btn .xiv-switch-thumb {
                 position: absolute; top: 0.2rem; left: 0.2rem; width: 1.8rem; height: 1.8rem;
-                border-radius: 50%; background-color: #fff; box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+                border-radius: 50%; background-color: #fff; box-shadow: 0 0.125rem 0.3125rem rgba(0,0,0,0.4);
                 transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1); display: grid; place-items: center; z-index: 2;
             }
-            .tm-img-zoom-toggle-btn.tm-active .tm-switch-thumb {
-                transform: translateX(5.3rem);
+            .xiv-img-zoom-toggle-btn.xiv-active .xiv-switch-thumb {
+                transform: translateX(8.4rem); /* 10.4 - 1.8 - 0.2 */
             }
 
-            .tm-img-zoom-toggle-btn .tm-switch-icon {
-                width: 1.1rem; height: 1.1rem; stroke: #000; stroke-width: 2.5; fill: none; stroke-linecap: round; stroke-linejoin: round;
-                transition: stroke 0.18s ease;
+            .xiv-img-zoom-toggle-btn .xiv-switch-icon {
+                width: 1.1rem; height: 1.1rem; stroke: #333; stroke-width: 2.5; fill: none; stroke-linecap: round; stroke-linejoin: round;
+                transition: stroke 0.25s ease;
             }
-            .tm-img-zoom-toggle-btn.tm-active .tm-switch-icon {
-                stroke: var(${CONFIG.CSS_VAR});
+            .xiv-img-zoom-toggle-btn.xiv-active .xiv-switch-icon {
+                stroke: var(${CONFIG.STYLE.CSS_VAR});
             }
 
-            .tm-img-zoom-toggle-btn:hover, .tm-img-zoom-toggle-btn:focus { opacity: 0.95; }
-            .tm-img-zoom-toggle-btn:focus-visible { outline: 2px solid var(${CONFIG.CSS_VAR}); outline-offset: 4px; }
+            .xiv-icon-plus {
+                transition: opacity 0.25s ease, transform 0.25s ease;
+                transform-origin: center;
+            }
+            .xiv-img-zoom-toggle-btn:not(.xiv-active) .xiv-icon-plus {
+                opacity: 0; transform: scale(0) rotate(-90deg);
+            }
 
-            #tm-img-popup {
-                position: fixed; z-index: ${CONFIG.Z_INDEX}; top: 50%; left: 50%; pointer-events: none;
-                border: 3px solid var(${CONFIG.CSS_VAR}); background: #000;
-                box-shadow: 0 8px 40px rgba(0,0,0,0.5), 0 2px 10px rgba(0,0,0,0.3); border-radius: 8px; overflow: hidden;
+            .xiv-img-zoom-toggle-btn:hover, .xiv-img-zoom-toggle-btn:focus { opacity: 0.95; }
+            .xiv-img-zoom-toggle-btn:focus-visible { outline: 0.125rem solid var(${CONFIG.STYLE.CSS_VAR}); outline-offset: 0.25rem; }
+
+            /* --- Popup Overlays --- */
+            #xiv-img-popup {
+                position: fixed; z-index: ${CONFIG.STYLE.Z_INDEX}; top: 50%; left: 50%; pointer-events: none;
+                border: 0.1875rem solid var(${CONFIG.STYLE.CSS_VAR}); background: #000;
+                box-shadow: 0 0.5rem 2.5rem rgba(0,0,0,0.5), 0 0.125rem 0.625rem rgba(0,0,0,0.3); border-radius: 0.5rem; overflow: hidden;
                 visibility: hidden; opacity: 0; transform: translate(-50%, -50%) scale(0.94);
-                transition: opacity ${CONFIG.FADE_DURATION_MS}ms ease-out, transform ${CONFIG.FADE_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear ${CONFIG.FADE_DURATION_MS}ms;
+                transition: opacity ${CONFIG.TIMING.FADE_DURATION_MS}ms ease-out, transform ${CONFIG.TIMING.FADE_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear ${CONFIG.TIMING.FADE_DURATION_MS}ms;
             }
 
-            #tm-img-popup.tm-visible {
+            #xiv-img-popup.xiv-visible {
                 visibility: visible; opacity: 1; transform: translate(-50%, -50%) scale(1);
-                transition: opacity ${CONFIG.FADE_DURATION_MS}ms ease-out, transform ${CONFIG.FADE_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 0s;
+                transition: opacity ${CONFIG.TIMING.FADE_DURATION_MS}ms ease-out, transform ${CONFIG.TIMING.FADE_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s linear 0s;
             }
 
-            .tm-media-wrapper { display: grid; place-items: center; background: #000; position: relative; }
-            .tm-thumb-blur, .tm-target-media { grid-area: 1 / 1; max-width: 95vw; max-height: 95vh; }
-            .tm-thumb-blur { width: 100%; height: 100%; object-fit: cover; filter: blur(15px) brightness(0.7); transform: scale(1.05); transition: opacity 0.4s ease; z-index: 1; }
+            .xiv-media-wrapper { display: grid; place-items: center; background: #000; position: relative; }
+            .xiv-thumb-blur, .xiv-target-media { grid-area: 1 / 1; max-width: 95vw; max-height: 95vh; }
+            .xiv-thumb-blur { width: 100%; height: 100%; object-fit: cover; filter: blur(1rem) brightness(0.7); transform: scale(1.05); transition: opacity 0.4s ease; z-index: 1; }
 
-            .tm-target-media { object-fit: contain; opacity: 0; transform: scale(0.98); transition: opacity 0.3s ease, transform 0.4s cubic-bezier(0.22, 1, 0.36, 1); z-index: 2; }
-            .tm-target-media.tm-loaded { opacity: 1; transform: scale(1); }
+            .xiv-target-media { object-fit: contain; opacity: 0; transform: scale(0.98); transition: opacity 0.3s ease, transform 0.4s cubic-bezier(0.22, 1, 0.36, 1); z-index: 2; }
+            .xiv-target-media.xiv-loaded { opacity: 1; transform: scale(1); }
 
-            .tm-loading-bar {
-                position: absolute; top: 0; left: 0; width: 100%; height: 6px;
+            .xiv-loading-bar {
+                position: absolute; top: 0; left: 0; width: 100%; height: 0.375rem;
                 background: rgba(0, 0, 0, 0.6); z-index: 10; opacity: 1;
                 transition: opacity 0.4s ease; overflow: hidden;
             }
-            .tm-loading-bar-indicator {
+            .xiv-loading-bar-indicator {
                 position: absolute; top: 0; left: -50%; height: 100%; width: 50%;
-                background: linear-gradient(90deg, transparent, var(${CONFIG.CSS_VAR}) 40%, #ffffff 50%, var(${CONFIG.CSS_VAR}) 60%, transparent);
-                box-shadow: 0 0 14px var(${CONFIG.CSS_VAR}), 0 0 4px #ffffff;
-                animation: tm-sweep 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+                background: linear-gradient(90deg, transparent, var(${CONFIG.STYLE.CSS_VAR}) 40%, #ffffff 50%, var(${CONFIG.STYLE.CSS_VAR}) 60%, transparent);
+                box-shadow: 0 0 0.875rem var(${CONFIG.STYLE.CSS_VAR}), 0 0 0.25rem #ffffff;
+                animation: xiv-sweep 1.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
             }
-            @keyframes tm-sweep { 0% { left: -50%; } 100% { left: 100%; } }
+            @keyframes xiv-sweep { 0% { left: -50%; } 100% { left: 100%; } }
 
-            .tm-fallback-notice { color: #fff; background: #d9534f; padding: 4px 8px; border-radius: 4px; font-size: 0.9em; margin-bottom: 8px; display: inline-block; font-family: sans-serif; position: relative; z-index: 3; margin: 16px; }
+            .xiv-fallback-notice { color: #fff; background: #d9534f; padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.9rem; margin-bottom: 0.5rem; display: inline-block; font-family: sans-serif; position: relative; z-index: 3; margin: 1rem; }
         `);
     }
 
@@ -257,7 +394,7 @@
             if (!/twimg\.com\/media\//.test(src)) return false;
             if (target.closest('[aria-label="Profile"]') || target.closest('svg')) return false;
             if (/\/status\/\d+\/photo\/\d+/.test(location.pathname)) {
-                if (target.closest('[data-testid="photoViewer"]') || target.closest('[aria-label*="Image"]') || target.style.maxHeight === '100vh') return false;
+                if (target.closest(CONFIG.SELECTORS.PHOTO_VIEWER) || target.closest('[aria-label*="Image"]') || target.style.maxHeight === '100vh') return false;
             }
             return true;
         }
@@ -303,107 +440,144 @@
         syncDynamicClasses();
 
         const btn = createElement('button', {
-            id: 'tm-img-sidebar-toggle',
+            id: 'xiv-img-sidebar-toggle',
             type: 'button',
-            className: `${CONFIG.CLASSES.BTN} tm-img-zoom-toggle-btn`,
+            className: `${CONFIG.CLASSES.BTN} xiv-img-zoom-toggle-btn`,
             role: 'switch',
-            'aria-checked': hoverEnabled ? 'true' : 'false',
-            'aria-label': 'Image Zoom Toggle'
+            'aria-checked': settings.enabled ? 'true' : 'false',
+            'aria-label': 'Image Zoom Toggle',
+            'data-animating': 'false'
         });
-        if (hoverEnabled) btn.classList.add('tm-active');
+        if (settings.enabled) btn.classList.add('xiv-active');
 
         const flexDiv = createElement('div', { className: CONFIG.CLASSES.FLEX_DIV });
         const iconWrap = createElement('div', { className: CONFIG.CLASSES.ICON_WRAP });
 
-        const leftSvg = createSVGElement('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true', class: `${CONFIG.CLASSES.SVG} tm-inner-svg` });
+        const leftSvg = createSVGElement('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true', class: `${CONFIG.CLASSES.SVG} xiv-inner-svg` });
         leftSvg.appendChild(createSVGElement('rect', { x: "3", y: "5", width: "18", height: "14", rx: "2.5", stroke: "currentColor", "stroke-width": "2", fill: "none" }));
         leftSvg.appendChild(createSVGElement('circle', { cx: "8.5", cy: "10.5", r: "1.5", fill: "currentColor" }));
         leftSvg.appendChild(createSVGElement('path', { d: "M21 19l-5.5-7-4.5 6-2-2.5L3 19", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round", fill: "none" }));
         iconWrap.appendChild(leftSvg);
 
         const labelDiv = createElement('div', { dir: 'ltr', className: CONFIG.CLASSES.LABEL_DIV });
-        const switchContainer = createElement('div', { className: 'tm-switch-container' });
-        const track = createElement('div', { className: 'tm-switch-track' });
 
-        const textOn = createElement('span', { className: 'tm-switch-text tm-switch-text-on' }, {}, 'ZOOM ON');
-        const textOff = createElement('span', { className: 'tm-switch-text tm-switch-text-off' }, {}, 'ZOOM OFF');
+        const mask = createElement('div', { className: 'xiv-switch-mask' });
+        if (settings.enabled) mask.classList.add('xiv-state-on');
 
-        const thumb = createElement('div', { className: 'tm-switch-thumb' });
+        const switchContainer = createElement('div', { className: 'xiv-switch-container' });
+
+        const trackBase = createElement('div', { className: 'xiv-track-base' });
+        const textOff = createElement('span', { className: 'xiv-switch-text xiv-text-off' }, {}, 'ZOOM OFF');
+        trackBase.appendChild(textOff);
+
+        const trackOverlay = createElement('div', { className: 'xiv-track-overlay' });
+        const textOn = createElement('span', { className: 'xiv-switch-text xiv-text-on' }, {}, 'ZOOM ON');
+        trackOverlay.appendChild(textOn);
+
+        const thumb = createElement('div', { className: 'xiv-switch-thumb' });
         const thumbSvg = createSVGElement('svg', {
             viewBox: '0 0 24 24',
             'aria-hidden': 'true',
-            class: 'tm-switch-icon'
+            class: 'xiv-switch-icon'
         });
-        thumbSvg.appendChild(createSVGElement('circle', { cx: '11', cy: '11', r: '8' }));
-        thumbSvg.appendChild(createSVGElement('line', { x1: '21', y1: '21', x2: '16.65', y2: '16.65' }));
-
-        track.appendChild(textOn);
-        track.appendChild(textOff);
+        thumbSvg.appendChild(createSVGElement('circle', { cx: '10', cy: '10', r: '7' }));
+        thumbSvg.appendChild(createSVGElement('line', { x1: '21', y1: '21', x2: '15', y2: '15' }));
+        thumbSvg.appendChild(createSVGElement('line', { x1: '7', y1: '10', x2: '13', y2: '10', class: 'xiv-icon-minus' }));
+        thumbSvg.appendChild(createSVGElement('line', { x1: '10', y1: '7', x2: '10', y2: '13', class: 'xiv-icon-plus' }));
         thumb.appendChild(thumbSvg);
-        switchContainer.appendChild(track);
+
+        switchContainer.appendChild(trackBase);
+        switchContainer.appendChild(trackOverlay);
         switchContainer.appendChild(thumb);
-        labelDiv.appendChild(switchContainer);
+        mask.appendChild(switchContainer);
+        labelDiv.appendChild(mask);
         flexDiv.appendChild(iconWrap);
         flexDiv.appendChild(labelDiv);
         btn.appendChild(flexDiv);
 
-        btn.addEventListener('click', handleToggleClick);
+        btn.addEventListener('click', handleToggleSequence);
         btn.addEventListener('mouseenter', debouncedUpdateThemeColor);
         return btn;
     }
 
-    function updateSidebarToggleUI() {
-        const btn = document.getElementById('tm-img-sidebar-toggle');
-        if (!btn) return;
+    async function handleToggleSequence(e) {
+        if (e && e.preventDefault) e.preventDefault();
 
-        btn.setAttribute('aria-checked', hoverEnabled ? 'true' : 'false');
-        if (hoverEnabled) {
-            btn.classList.add('tm-active');
-        } else {
-            btn.classList.remove('tm-active');
-        }
-    }
+        const btn = document.getElementById('xiv-img-sidebar-toggle');
+        if (!btn || btn.dataset.animating === 'true') return;
 
-    function handleToggleClick(e) {
-        e.preventDefault();
+        btn.dataset.animating = 'true';
         updateThemeColor();
-        hoverEnabled = !hoverEnabled;
-        localStorage.setItem(CONFIG.STORAGE_KEY, hoverEnabled);
-        updateSidebarToggleUI();
 
-        if (!hoverEnabled) {
+        const mask = btn.querySelector('.xiv-switch-mask');
+        const willEnable = !settings.enabled;
+
+        if (willEnable) {
+            // Stage 1: Elongate
+            mask.classList.add('xiv-anim-elongated');
+            await sleep(200);
+
+            // Stage 2: Wipe
+            settings.enabled = true;
+            btn.classList.add('xiv-active');
+            btn.setAttribute('aria-checked', 'true');
+            saveSettings();
+            await sleep(250);
+
+            // Stage 3: Shorten (Left side pulls in)
+            mask.classList.remove('xiv-anim-elongated');
+            mask.classList.add('xiv-state-on');
+        } else {
+            // Stage 1: Elongate (Left side pushes out)
+            mask.classList.remove('xiv-state-on');
+            mask.classList.add('xiv-anim-elongated');
+            await sleep(200);
+
+            // Stage 2: Wipe
+            settings.enabled = false;
+            btn.classList.remove('xiv-active');
+            btn.setAttribute('aria-checked', 'false');
+            saveSettings();
+            await sleep(250);
+
+            // Stage 3: Shorten
+            mask.classList.remove('xiv-anim-elongated');
+        }
+
+        await sleep(200); // Allow final mask transition to complete
+        btn.dataset.animating = 'false';
+
+        if (!settings.enabled) {
             hidePopup();
         } else {
             isDismissedUntilMove = false;
             reevaluateCursorPosition();
         }
 
-        if (e.currentTarget && e.currentTarget.blur) e.currentTarget.blur();
+        if (e && e.currentTarget && e.currentTarget.blur) e.currentTarget.blur();
     }
 
     function ensureSidebarToggle() {
         updateThemeColor();
-        const nav = document.querySelector('[role="navigation"]');
+        const nav = document.querySelector(CONFIG.SELECTORS.NAV);
         if (!nav) return;
 
-        const existingBtn = document.getElementById('tm-img-sidebar-toggle');
-        if (existingBtn) {
-            updateSidebarToggleUI();
-            return;
-        }
+        const existingBtn = document.getElementById('xiv-img-sidebar-toggle');
+        if (existingBtn) return;
         nav.appendChild(buildSidebarToggle());
     }
 
     // --- Popup Rendering ---
     function setupPopupContainer() {
-        popupEl.id = 'tm-img-popup';
+        popupEl.id = 'xiv-img-popup';
         document.body.appendChild(popupEl);
     }
 
     function showPopup(mediaUrl, fallbackUrl, isVideo) {
-        if (popupEl.classList.contains('tm-visible')) {
-            popupEl.classList.remove('tm-visible');
-            setTimeout(() => renderPopupContent(mediaUrl, fallbackUrl, isVideo), CONFIG.FADE_DURATION_MS);
+        manageScrollListeners(true);
+        if (popupEl.classList.contains('xiv-visible')) {
+            popupEl.classList.remove('xiv-visible');
+            setTimeout(() => renderPopupContent(mediaUrl, fallbackUrl, isVideo), CONFIG.TIMING.FADE_DURATION_MS);
         } else {
             renderPopupContent(mediaUrl, fallbackUrl, isVideo);
         }
@@ -413,23 +587,23 @@
         popupEl.replaceChildren();
         if (loadingCleanupTimer) { clearTimeout(loadingCleanupTimer); loadingCleanupTimer = null; }
 
-        const wrapper = createElement('div', { className: 'tm-media-wrapper' });
+        const wrapper = createElement('div', { className: 'xiv-media-wrapper' });
         let thumb = null;
 
-        const loader = createElement('div', { className: 'tm-loading-bar' });
-        const indicator = createElement('div', { className: 'tm-loading-bar-indicator' });
+        const loader = createElement('div', { className: 'xiv-loading-bar' });
+        const indicator = createElement('div', { className: 'xiv-loading-bar-indicator' });
         loader.appendChild(indicator);
         wrapper.appendChild(loader);
 
         if (fallbackUrl) {
-            thumb = createElement('img', { className: 'tm-thumb-blur', src: fallbackUrl });
+            thumb = createElement('img', { className: 'xiv-thumb-blur', src: fallbackUrl });
             wrapper.appendChild(thumb);
         }
 
-        const media = createElement(isVideo ? 'video' : 'img', { className: 'tm-target-media', src: mediaUrl });
+        const media = createElement(isVideo ? 'video' : 'img', { className: 'xiv-target-media', src: mediaUrl });
 
         const handleLoad = () => {
-            media.classList.add('tm-loaded');
+            media.classList.add('xiv-loaded');
 
             loader.style.opacity = '0';
             if (thumb) thumb.style.opacity = '0';
@@ -437,7 +611,7 @@
             loadingCleanupTimer = setTimeout(() => {
                 if (loader.parentNode) loader.parentNode.removeChild(loader);
                 if (thumb && thumb.parentNode) thumb.parentNode.removeChild(thumb);
-            }, 400); // Allow fade opacity to process before removing from DOM
+            }, 400);
         };
 
         if (isVideo) {
@@ -452,11 +626,11 @@
         media.onerror = () => {
             wrapper.replaceChildren();
             const noticeText = (fallbackUrl && media.src !== fallbackUrl) ? 'Full size unavailable, showing thumbnail' : 'Media unavailable';
-            const notice = createElement('span', { className: 'tm-fallback-notice' }, {}, noticeText);
+            const notice = createElement('span', { className: 'xiv-fallback-notice' }, {}, noticeText);
             popupEl.appendChild(notice);
 
             if (fallbackUrl && media.src !== fallbackUrl) {
-                const thumbImg = createElement('img', { className: 'tm-target-media tm-loaded', src: fallbackUrl });
+                const thumbImg = createElement('img', { className: 'xiv-target-media xiv-loaded', src: fallbackUrl });
                 popupEl.appendChild(thumbImg);
             }
         };
@@ -465,7 +639,7 @@
         popupEl.appendChild(wrapper);
 
         void popupEl.offsetWidth;
-        popupEl.classList.add('tm-visible');
+        popupEl.classList.add('xiv-visible');
     }
 
     function hidePopup() {
@@ -473,15 +647,16 @@
         if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
         if (loadingCleanupTimer) { clearTimeout(loadingCleanupTimer); loadingCleanupTimer = null; }
 
-        popupEl.classList.remove('tm-visible');
+        popupEl.classList.remove('xiv-visible');
 
         setTimeout(() => {
-            if (!popupEl.classList.contains('tm-visible')) {
+            if (!popupEl.classList.contains('xiv-visible')) {
                 popupEl.replaceChildren();
             }
-        }, CONFIG.FADE_DURATION_MS + 20); // Safety buffer
+        }, CONFIG.TIMING.FADE_DURATION_MS + 20);
 
         currentImgUrl = null;
+        manageScrollListeners(false);
     }
 
     function triggerPopupForImg(target) {
@@ -490,7 +665,7 @@
 
         currentHoverTarget = target;
 
-        if (!hoverEnabled) return;
+        if (!settings.enabled) return;
 
         const fullImgUrl = getFullImageUrl(target);
         if (!fullImgUrl || currentImgUrl === fullImgUrl) return;
@@ -498,15 +673,16 @@
         debouncedUpdateThemeColor();
         currentImgUrl = fullImgUrl;
 
-        // Aggressively clear active timers to prevent double-firing
         if (hideTimer) clearTimeout(hideTimer);
         if (showTimer) clearTimeout(showTimer);
 
+        manageScrollListeners(true);
+
         showTimer = setTimeout(() => {
-            if (hoverEnabled && currentHoverTarget === target && !isDismissedUntilMove) {
+            if (settings.enabled && currentHoverTarget === target && !isDismissedUntilMove) {
                 showPopup(fullImgUrl, getFallbackUrl(target), target.tagName === 'VIDEO');
             }
-        }, CONFIG.HOVER_DELAY_MS);
+        }, settings.hoverDelay);
     }
 
     // --- Contextual Target Resolution ---
@@ -518,6 +694,19 @@
             triggerPopupForImg(target);
         } else {
             currentHoverTarget = null;
+        }
+    }
+
+    // --- Dynamic Listeners Management ---
+    function manageScrollListeners(attach) {
+        if (attach && !scrollListenersAttached) {
+            window.addEventListener('scroll', handleScroll, { passive: true, capture: true });
+            window.addEventListener('wheel', handleScroll, { passive: true, capture: true });
+            scrollListenersAttached = true;
+        } else if (!attach && scrollListenersAttached) {
+            window.removeEventListener('scroll', handleScroll, { capture: true });
+            window.removeEventListener('wheel', handleScroll, { capture: true });
+            scrollListenersAttached = false;
         }
     }
 
@@ -539,11 +728,11 @@
     }
 
     function handleMouseOut(e) {
-        if (showTimer) { clearTimeout(showTimer); showTimer = null; } // Instantly abort pending show
+        if (showTimer) { clearTimeout(showTimer); showTimer = null; }
 
         const target = resolveMediaTarget(e.target);
         if (target && shouldHandleImg(target)) {
-            hideTimer = setTimeout(hidePopup, CONFIG.HIDE_DELAY_MS);
+            hideTimer = setTimeout(hidePopup, settings.hideDelay);
         }
     }
 
@@ -558,17 +747,7 @@
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
 
         if (e.key === CONFIG.TOGGLE_HOTKEY && !e.repeat && !e.altKey && !e.shiftKey && !e.metaKey) {
-            hoverEnabled = !hoverEnabled;
-            localStorage.setItem(CONFIG.STORAGE_KEY, hoverEnabled);
-            updateThemeColor();
-            updateSidebarToggleUI();
-
-            if (!hoverEnabled) {
-                hidePopup();
-            } else {
-                isDismissedUntilMove = false;
-                reevaluateCursorPosition();
-            }
+            handleToggleSequence(); // Route through the async lock sequencer
         }
     }
 
@@ -595,20 +774,16 @@
         window.addEventListener('keydown', handleKeyDown);
         window.addEventListener('keyup', handleKeyUp);
 
-        // Listen to native scroll AND wheel, using capturing phase to catch nested scrolling containers
-        window.addEventListener('scroll', handleScroll, { passive: true, capture: true });
-        window.addEventListener('wheel', handleScroll, { passive: true, capture: true });
-
-        // MutationObserver debounced to prevent thrashing
         const debouncedEnsureSidebar = debounce(() => {
-            const nav = document.querySelector('[role="navigation"]');
-            if (nav && !document.getElementById('tm-img-sidebar-toggle')) {
+            const nav = document.querySelector(CONFIG.SELECTORS.NAV);
+            if (nav && !document.getElementById('xiv-img-sidebar-toggle')) {
                 ensureSidebarToggle();
             }
         }, 150);
 
         const observer = new MutationObserver(debouncedEnsureSidebar);
-        observer.observe(document.body, { childList: true, subtree: true });
+        const reactRoot = document.querySelector(CONFIG.SELECTORS.REACT_ROOT) || document.body;
+        observer.observe(reactRoot, { childList: true, subtree: true });
 
         window.addEventListener('popstate', ensureSidebarToggle);
         document.body.addEventListener('click', () => setTimeout(ensureSidebarToggle, 250), true);
@@ -620,6 +795,7 @@
         setupPopupContainer();
         attachEventListeners();
         updateThemeColor();
+        log('Initialized successfully.');
     }
 
     init();
