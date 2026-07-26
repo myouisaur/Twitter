@@ -2,7 +2,7 @@
 // @name         [Twitter] Image Zoom on Hover
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      5.6
+// @version      6.2
 // @description  Automatically enlarges images and videos on hover for a seamless browsing experience.
 // @author       Xiv
 // @match        *://*.twitter.com/*
@@ -10,7 +10,7 @@
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @run-at       document-idle
+// @run-at       document-end
 // @noframes
 // @updateURL    https://myouisaur.github.io/Twitter/zoom-on-hover.user.js
 // @downloadURL  https://myouisaur.github.io/Twitter/zoom-on-hover.user.js
@@ -20,8 +20,8 @@
     'use strict';
 
     // --- Duplicate Execution Guard ---
-    if (window.__xivImageZoomInitialized) return;
-    window.__xivImageZoomInitialized = true;
+    if (window.xivAlreadyRunning) return;
+    window.xivAlreadyRunning = true;
 
     // --- Configuration ---
     const CONFIG = {
@@ -115,6 +115,8 @@
     const popupEl = document.createElement('div');
 
     document.documentElement.style.setProperty(CONFIG.STYLE.CSS_VAR, settings.themeColor || CONFIG.STYLE.FALLBACK_COLOR);
+    document.documentElement.dataset.xivEnabled = settings.enabled;
+    document.documentElement.dataset.xivZooming = 'false';
 
     // --- Utilities ---
     function log(msg, ...args) {
@@ -229,7 +231,15 @@
     // --- Styles Injection ---
     function injectStyles() {
         GM_addStyle(`
-            .xiv-img-zoom-toggle-btn .xiv-inner-svg { transition: color 0.2s ease; }
+            /* --- Cursor Feedback --- */
+            /* Applies unconditionally to valid images, UNLESS the script is actively zooming */
+            html:not([data-xiv-zooming="true"]) .xiv-zoom-cursor {
+                cursor: zoom-in !important;
+            }
+
+            /* --- Toggle Base Styles --- */
+            .xiv-img-zoom-toggle-btn .xiv-inner-svg { transition: color 0.15s ease; }
+            /* This remains tied to .xiv-active for instant Optimistic UI feedback */
             .xiv-img-zoom-toggle-btn.xiv-active .xiv-inner-svg { color: var(${CONFIG.STYLE.CSS_VAR}); }
 
             /* --- Mask Architecture --- */
@@ -245,7 +255,7 @@
                 overflow: hidden;
                 background-color: #333;
                 /* Synced timing with inner container */
-                transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+                transition: width 0.15s cubic-bezier(0.4, 0, 0.2, 1);
             }
 
             .xiv-switch-mask.xiv-anim-elongated {
@@ -264,7 +274,7 @@
                 width: 10.4rem;
                 height: 2.2rem;
                 /* Synced timing with mask width */
-                transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+                transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1);
                 transform: translateX(0); /* Anchor left */
             }
 
@@ -289,9 +299,11 @@
             .xiv-track-overlay {
                 background-color: var(${CONFIG.STYLE.CSS_VAR}); z-index: 1;
                 clip-path: inset(0 100% 0 0);
-                transition: clip-path 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+                transition: clip-path 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
             }
-            .xiv-img-zoom-toggle-btn.xiv-active .xiv-track-overlay {
+
+            /* Tied to .xiv-anim-wiped to respect the Stage 2 sequence */
+            .xiv-img-zoom-toggle-btn.xiv-anim-wiped .xiv-track-overlay {
                 clip-path: inset(0 0 0 0);
             }
 
@@ -300,17 +312,17 @@
                 position: absolute; left: 3.2rem; /* The shared central anchor point for the transition */
                 color: #fff; font-family: inherit; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.05em;
                 pointer-events: none; user-select: none; white-space: nowrap;
-                transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+                transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1);
                 transform: translateX(0); /* Aligned during elongation */
             }
 
             /* Resting OFF: Slide left deeper to account for 'ZOOM OFF' width */
-            .xiv-img-zoom-toggle-btn:not(.xiv-active) .xiv-switch-mask:not(.xiv-anim-elongated) .xiv-text-off {
+            .xiv-img-zoom-toggle-btn:not(.xiv-anim-wiped) .xiv-switch-mask:not(.xiv-anim-elongated) .xiv-text-off {
                 transform: translateX(-0.75rem);
             }
 
             /* Resting ON: Slide right into the free space */
-            .xiv-img-zoom-toggle-btn.xiv-active .xiv-switch-mask:not(.xiv-anim-elongated) .xiv-text-on {
+            .xiv-img-zoom-toggle-btn.xiv-anim-wiped .xiv-switch-mask:not(.xiv-anim-elongated) .xiv-text-on {
                 transform: translateX(0.4rem);
             }
 
@@ -318,25 +330,25 @@
             .xiv-img-zoom-toggle-btn .xiv-switch-thumb {
                 position: absolute; top: 0.2rem; left: 0.2rem; width: 1.8rem; height: 1.8rem;
                 border-radius: 50%; background-color: #fff; box-shadow: 0 0.125rem 0.3125rem rgba(0,0,0,0.4);
-                transition: transform 0.25s cubic-bezier(0.2, 0.8, 0.2, 1); display: grid; place-items: center; z-index: 2;
+                transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); display: grid; place-items: center; z-index: 2;
             }
-            .xiv-img-zoom-toggle-btn.xiv-active .xiv-switch-thumb {
+            .xiv-img-zoom-toggle-btn.xiv-anim-wiped .xiv-switch-thumb {
                 transform: translateX(8.4rem); /* 10.4 - 1.8 - 0.2 */
             }
 
             .xiv-img-zoom-toggle-btn .xiv-switch-icon {
                 width: 1.1rem; height: 1.1rem; stroke: #333; stroke-width: 2.5; fill: none; stroke-linecap: round; stroke-linejoin: round;
-                transition: stroke 0.25s ease;
+                transition: stroke 0.2s ease;
             }
-            .xiv-img-zoom-toggle-btn.xiv-active .xiv-switch-icon {
+            .xiv-img-zoom-toggle-btn.xiv-anim-wiped .xiv-switch-icon {
                 stroke: var(${CONFIG.STYLE.CSS_VAR});
             }
 
             .xiv-icon-plus {
-                transition: opacity 0.25s ease, transform 0.25s ease;
+                transition: opacity 0.2s ease, transform 0.2s ease;
                 transform-origin: center;
             }
-            .xiv-img-zoom-toggle-btn:not(.xiv-active) .xiv-icon-plus {
+            .xiv-img-zoom-toggle-btn:not(.xiv-anim-wiped) .xiv-icon-plus {
                 opacity: 0; transform: scale(0) rotate(-90deg);
             }
 
@@ -448,7 +460,14 @@
             'aria-label': 'Image Zoom Toggle',
             'data-animating': 'false'
         });
-        if (settings.enabled) btn.classList.add('xiv-active');
+
+        const mask = createElement('div', { className: 'xiv-switch-mask' });
+
+        if (settings.enabled) {
+            btn.classList.add('xiv-active');
+            btn.classList.add('xiv-anim-wiped'); // Set internal animation state
+            mask.classList.add('xiv-state-on');
+        }
 
         const flexDiv = createElement('div', { className: CONFIG.CLASSES.FLEX_DIV });
         const iconWrap = createElement('div', { className: CONFIG.CLASSES.ICON_WRAP });
@@ -460,9 +479,6 @@
         iconWrap.appendChild(leftSvg);
 
         const labelDiv = createElement('div', { dir: 'ltr', className: CONFIG.CLASSES.LABEL_DIV });
-
-        const mask = createElement('div', { className: 'xiv-switch-mask' });
-        if (settings.enabled) mask.classList.add('xiv-state-on');
 
         const switchContainer = createElement('div', { className: 'xiv-switch-container' });
 
@@ -512,17 +528,31 @@
         const mask = btn.querySelector('.xiv-switch-mask');
         const willEnable = !settings.enabled;
 
+        // --- OPTIMISTIC UI: Instant State & Visual Application ---
+        settings.enabled = willEnable;
+        document.documentElement.dataset.xivEnabled = willEnable;
+        saveSettings();
+
+        if (willEnable) {
+            btn.classList.add('xiv-active');
+            btn.setAttribute('aria-checked', 'true');
+            isDismissedUntilMove = false;
+            reevaluateCursorPosition(); // Activates zoom instantly if cursor is already hovering
+        } else {
+            btn.classList.remove('xiv-active');
+            btn.setAttribute('aria-checked', 'false');
+            hidePopup(); // Dismisses active zoom instantly
+        }
+
+        // --- BACKGROUND ANIMATION: Plays out sequentially without blocking the user ---
         if (willEnable) {
             // Stage 1: Elongate
             mask.classList.add('xiv-anim-elongated');
-            await sleep(200);
+            await sleep(125);
 
             // Stage 2: Wipe
-            settings.enabled = true;
-            btn.classList.add('xiv-active');
-            btn.setAttribute('aria-checked', 'true');
-            saveSettings();
-            await sleep(250);
+            btn.classList.add('xiv-anim-wiped');
+            await sleep(150);
 
             // Stage 3: Shorten (Left side pulls in)
             mask.classList.remove('xiv-anim-elongated');
@@ -531,28 +561,18 @@
             // Stage 1: Elongate (Left side pushes out)
             mask.classList.remove('xiv-state-on');
             mask.classList.add('xiv-anim-elongated');
-            await sleep(200);
+            await sleep(125);
 
             // Stage 2: Wipe
-            settings.enabled = false;
-            btn.classList.remove('xiv-active');
-            btn.setAttribute('aria-checked', 'false');
-            saveSettings();
-            await sleep(250);
+            btn.classList.remove('xiv-anim-wiped');
+            await sleep(150);
 
             // Stage 3: Shorten
             mask.classList.remove('xiv-anim-elongated');
         }
 
-        await sleep(200); // Allow final mask transition to complete
+        await sleep(125); // Allow final mask transition to complete
         btn.dataset.animating = 'false';
-
-        if (!settings.enabled) {
-            hidePopup();
-        } else {
-            isDismissedUntilMove = false;
-            reevaluateCursorPosition();
-        }
 
         if (e && e.currentTarget && e.currentTarget.blur) e.currentTarget.blur();
     }
@@ -574,7 +594,9 @@
     }
 
     function showPopup(mediaUrl, fallbackUrl, isVideo) {
+        document.documentElement.dataset.xivZooming = 'true';
         manageScrollListeners(true);
+
         if (popupEl.classList.contains('xiv-visible')) {
             popupEl.classList.remove('xiv-visible');
             setTimeout(() => renderPopupContent(mediaUrl, fallbackUrl, isVideo), CONFIG.TIMING.FADE_DURATION_MS);
@@ -643,6 +665,7 @@
     }
 
     function hidePopup() {
+        document.documentElement.dataset.xivZooming = 'false';
         if (showTimer) { clearTimeout(showTimer); showTimer = null; }
         if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
         if (loadingCleanupTimer) { clearTimeout(loadingCleanupTimer); loadingCleanupTimer = null; }
@@ -668,7 +691,10 @@
         if (!settings.enabled) return;
 
         const fullImgUrl = getFullImageUrl(target);
-        if (!fullImgUrl || currentImgUrl === fullImgUrl) return;
+        if (!fullImgUrl) return;
+
+        // Allow recovery if the timer died and we are not zooming, even if URLs match
+        if (currentImgUrl === fullImgUrl && (showTimer || document.documentElement.dataset.xivZooming === 'true')) return;
 
         debouncedUpdateThemeColor();
         currentImgUrl = fullImgUrl;
@@ -690,7 +716,13 @@
         let target = document.elementFromPoint(lastMouseX, lastMouseY);
         target = resolveMediaTarget(target);
 
+        // Clean up previous hover target cursor if we moved off it via scroll/hotkey
+        if (currentHoverTarget && currentHoverTarget !== target) {
+            currentHoverTarget.classList.remove('xiv-zoom-cursor');
+        }
+
         if (target && shouldHandleImg(target)) {
+            target.classList.add('xiv-zoom-cursor');
             triggerPopupForImg(target);
         } else {
             currentHoverTarget = null;
@@ -716,6 +748,14 @@
             if (isDismissedUntilMove) {
                 isDismissedUntilMove = false;
                 reevaluateCursorPosition();
+            } else if (settings.enabled && !showTimer && document.documentElement.dataset.xivZooming !== 'true') {
+                // --- Self-Healing Failsafe ---
+                // Catch React Virtual DOM swaps and invisible overlay interruptions
+                const target = resolveMediaTarget(e.target);
+                if (target && shouldHandleImg(target)) {
+                    target.classList.add('xiv-zoom-cursor');
+                    triggerPopupForImg(target);
+                }
             }
         }
         lastMouseX = e.clientX;
@@ -724,15 +764,21 @@
 
     function handleMouseOver(e) {
         const target = resolveMediaTarget(e.target);
-        triggerPopupForImg(target);
+        if (target && shouldHandleImg(target)) {
+            target.classList.add('xiv-zoom-cursor');
+            triggerPopupForImg(target);
+        }
     }
 
     function handleMouseOut(e) {
         if (showTimer) { clearTimeout(showTimer); showTimer = null; }
 
         const target = resolveMediaTarget(e.target);
-        if (target && shouldHandleImg(target)) {
-            hideTimer = setTimeout(hidePopup, settings.hideDelay);
+        if (target) {
+            target.classList.remove('xiv-zoom-cursor');
+            if (shouldHandleImg(target)) {
+                hideTimer = setTimeout(hidePopup, settings.hideDelay);
+            }
         }
     }
 
