@@ -2,7 +2,7 @@
 // @name         [Twitter] Media Extractor
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://twitter.com/favicon.ico
-// @version      7.2
+// @version      7.13
 // @description  Adds floating liquid glass buttons to images and videos for seamless background downloading.
 // @author       Xiv
 // @match        *://*.twitter.com/*
@@ -11,9 +11,15 @@
 // @grant        GM_openInTab
 // @grant        GM_xmlhttpRequest
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // @connect      twimg.com
 // @connect      video.twimg.com
 // @connect      pbs.twimg.com
+// @connect      abs.twimg.com
+// @connect      cdn.syndication.twimg.com
+// @connect      api.fxtwitter.com
+// @connect      api.vxtwitter.com
+// @run-at       document-start
 // @noframes
 // @updateURL    https://myouisaur.github.io/Twitter/media-extractor.user.js
 // @downloadURL  https://myouisaur.github.io/Twitter/media-extractor.user.js
@@ -26,6 +32,10 @@
   if (window.__xivMediaExtractorRunning) return;
   window.__xivMediaExtractorRunning = true;
 
+  // The page's real window. Patching the sandbox's own window can leave the page's
+  // fetch/XHR untouched, which would make every network hook below silently blind.
+  const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+
   // ==========================================================================
   // 1. CONFIGURATION & STATE
   // ==========================================================================
@@ -34,19 +44,66 @@
     THROTTLE_MS: 200,
     MIN_SIZE: 50,
     MAX_CACHE_SIZE: 500,
+    MAX_TWEET_ID_CANDIDATES: 3,
+    MAX_BUNDLE_FETCHES: 6,
+    SYNDICATION_URL: 'https://cdn.syndication.twimg.com/tweet-result',
+    SYNDICATION_TIMEOUT_MS: 8000,
+    // Feature flag: last-resort lookup through public mirror services. Only the tweet ID
+    // is sent, and only after every other source failed (e.g. sensitive posts while logged out).
+    ENABLE_MIRROR_LOOKUP: true,
+    MIRROR_TIMEOUT_MS: 10000,
+    MIRROR_URLS: [
+      'https://api.fxtwitter.com/i/status/',
+      'https://api.vxtwitter.com/i/status/'
+    ],
+    // Any full video file address inside a mirror's reply.
+    MIRROR_VIDEO_URL: /https:\/\/video\.twimg\.com\/[^"'\s\\]+?\.mp4[^"'\s\\]*/g,
+    BUNDLE_TIMEOUT_MS: 20000,
+    // Same-origin legacy endpoint; needs no query ID, so it survives Twitter's rotating GraphQL IDs.
+    LEGACY_STATUS_PATH: '/i/api/1.1/statuses/show.json',
+    // Any response whose URL contains one of these is checked for video data.
+    API_URL_PATTERNS: ['/graphql/', '/i/api/', 'TweetDetail', 'UserBy', 'Timeline'],
+    PATTERNS: {
+      // The media ID (or GIF name) in a poster URL is the same key used in the file path of the video itself.
+      POSTER_ID: /\/(?:ext_tw_video_thumb|amplify_video_thumb)\/(\d+)\//,
+      POSTER_GIF: /\/tweet_video_thumb\/([\w-]+)\./,
+      // Captures the media ID (group 1) or GIF name (group 2) of a loaded MP4 file.
+      OBSERVED_VIDEO: /video\.twimg\.com\/(?:(?:amplify_video|ext_tw_video)\/(\d+)\/[^?]*|tweet_video\/([\w-]+))\.mp4/,
+      VIDEO_RESOLUTION: /\/(\d{2,5})x(\d{2,5})\//,
+      // Streaming pieces live under .../{start}/{end}/{W}x{H}/...; the init piece is an
+      // ".mp4" that holds no picture, so it must never be mistaken for the video.
+      STREAM_SEGMENT: /\/\d+\/\d+\/\d{2,5}x\d{2,5}\//,
+      // Page requests worth remembering so they can be replayed for another tweet.
+      API_TEMPLATE: /\/graphql\/[\w-]+\/(TweetDetail|TweetResultByRestId)\?/,
+      // Twitter's own web-client script bundles, and the public token baked into them.
+      BUNDLE_URL: /abs\.twimg\.com\/responsive-web\/client-web[^/]*\/.*\.js/,
+      BEARER_TOKEN: /AAAAAAAAAAAAAAAAAAAAA[\w%]{30,}/
+    },
+    MESSAGES: {
+      LOOKING_UP: 'Looking up video…',
+      VIDEO_NOT_FOUND: 'Could not find this video. Play it for a second, then try again.'
+    },
     SELECTORS: {
       IMG: 'img[src*="twimg.com"]',
-      VIDEO: '[data-testid="videoComponent"], [data-testid="videoPlayer"]',
+      VIDEO: 'video',
       TWEET: 'article, [data-testid="tweet"]',
-      SAFE_PARENT: '[data-testid="tweetPhoto"], [data-testid="videoComponent"]'
+      STATUS_LINK: 'a[href*="/status/"]',
+      CONTAINER: '.xiv-btn-container',
+      CONTAINER_IMAGE: '.xiv-btn-container[data-xiv-kind="image"]',
+      CONTAINER_VIDEO: '.xiv-btn-container[data-xiv-kind="video"]'
     },
     CLASSES: {
       WRAPPER: 'xiv-wrap',
       CONTAINER: 'xiv-btn-container',
+      VISIBLE: 'xiv-visible',
       BTN: 'xiv-action-btn',
       POS_LEFT: 'xiv-left',
       POS_RIGHT: 'xiv-right',
       POS_CENTER_BOT: 'xiv-center-bottom'
+    },
+    KINDS: {
+      IMAGE: 'image',
+      VIDEO: 'video'
     },
     EXCLUDE_URLS: ['/emoji/', '/hashflags/'],
     IGNORED_JSON_KEYS: new Set(['user', 'core', 'promotedMetadata', 'clientEventInfo', 'entities', 'edit_control', 'views'])
@@ -61,6 +118,29 @@
 
   const State = {
     videoCache: new Map(),
+    // media ID (or GIF name) -> { url, area } of the best full MP4 the player itself loaded.
+    observedVideos: new Map(),
+    // Credentials and request shapes copied from the page's own traffic.
+    auth: { bearer: null, templates: {} },
+    // Counters shown by the diagnostics menu command.
+    stats: { responsesSeen: 0, responsesWithVideo: 0 },
+    originalFetch: null,
+    // media element -> its button container. Lets scan() detect containers that
+    // React removed while the media element itself survived a re-render.
+    containers: new WeakMap(),
+    // button container -> its media element. Lets the hover check read the
+    // media's on-screen rectangle.
+    owners: new WeakMap(),
+    // media elements currently waiting on the IntersectionObserver.
+    pending: new WeakSet(),
+    // images judged too small, keyed by the src they were judged at.
+    skipped: new WeakMap(),
+    // containers currently force-shown by the pointer-position hover check.
+    hovered: new Set(),
+    // tweetId -> in-flight syndication lookup, so repeat clicks share one request.
+    syndicationRequests: new Map(),
+    // In-flight token discovery, so overlapping lookups share one bundle download.
+    bearerDiscovery: null,
     observer: null,
     scanTimeout: null
   };
@@ -117,51 +197,139 @@
       if (/\/profile_banners\//.test(base)) return { url: base.replace(/\/\d+x\d+$/, '/1500x500'), ext };
       if (/\/profile_images\//.test(base)) return { url: base, ext };
 
-      if (/\/media\//.test(base) || /\/video_thumb\//.test(base) || /\/ext_tw_video_thumb\//.test(base) || /\/amplify_video_thumb\//.test(base)) {
-        const cleanBase = base.replace(/:(small|medium|large|thumb)$/, '');
-        return { url: `${cleanBase}?format=${ext}&name=orig`, ext };
+      const cleanBase = base.replace(/:(small|medium|large|thumb)$/, '');
+
+      // Video thumbnails 404 without a size and need name=orig...
+      if (/video_thumb\//.test(base)) {
+        return { url: `${cleanBase}?format=jpg&name=orig`, ext: 'jpg' };
+      }
+
+      // ...while regular photos stopped serving the raw file with name=orig, so
+      // they omit the size and force jpg instead of webp.
+      if (/\/media\//.test(base)) {
+        return { url: `${cleanBase}?format=jpg`, ext: 'jpg' };
       }
       return { url, ext };
     },
 
-    getTweetId(el) {
-      const tweetContainer = el.closest(CONFIG.SELECTORS.TWEET);
-      if (tweetContainer) {
-        const link = tweetContainer.querySelector('a[href*="/status/"]');
-        if (link) {
-          const match = link.href.match(/\/status\/(\d+)/);
-          if (match) return match[1];
-        }
-      }
-      const urlMatch = window.location.pathname.match(/\/status\/(\d+)/);
-      return urlMatch ? urlMatch[1] : null;
+    extractStatusId(link) {
+      const match = link?.href.match(/\/status\/(\d+)/);
+      return match ? match[1] : null;
     },
 
-    // Determines which video "slot" (0-indexed, document order) a given leaf video
-    // node occupies within its tweet. Twitter renders multi-video tweets in the same
+    // Twitter's markup no longer exposes stable test IDs, so candidates are
+    // gathered from the closest scope outward: the player's own wrapper (it links
+    // to the video's tweet), then the tweet container, then the page URL. Several
+    // are returned because quote tweets and replies put other tweets' links first.
+    getTweetIdCandidates(el) {
+      const ids = [];
+      const add = (id) => { if (id && !ids.includes(id)) ids.push(id); };
+
+      [el.parentElement, el.closest(CONFIG.SELECTORS.TWEET)].forEach(scope => {
+        scope?.querySelectorAll(CONFIG.SELECTORS.STATUS_LINK).forEach(link => add(this.extractStatusId(link)));
+      });
+      add(window.location.pathname.match(/\/status\/(\d+)/)?.[1]);
+
+      return ids.slice(0, CONFIG.MAX_TWEET_ID_CANDIDATES);
+    },
+
+    // Determines which video "slot" (0-indexed, document order) a given <video>
+    // occupies within its tweet. Twitter renders multi-video tweets in the same
     // order as extended_entities.media, so this index lines up with the cache key
-    // built in Interceptor.extractVideos(). Operates on DOM.getLeafVideoNodes() so a
-    // shared grid wrapper (which can match SAFE_PARENT for every video in the post)
-    // never collapses distinct videos down to the same index.
+    // built in Interceptor.extractVideos().
     getVideoSlotIndex(videoComp) {
-      if (!videoComp) return 0;
-      const tweetContainer = videoComp.closest(CONFIG.SELECTORS.TWEET);
+      const tweetContainer = videoComp?.closest(CONFIG.SELECTORS.TWEET);
       if (!tweetContainer) return 0;
 
-      const leaves = DOM.getLeafVideoNodes(tweetContainer);
-      const index = leaves.indexOf(videoComp);
+      const videos = Array.from(tweetContainer.querySelectorAll(CONFIG.SELECTORS.VIDEO));
+      const index = videos.indexOf(videoComp);
       return index >= 0 ? index : 0;
     },
 
-    // Extracts a video's own media ID from its poster/thumbnail URL (e.g.
-    // .../ext_tw_video_thumb/{id}/... or .../amplify_video_thumb/{id}/...). This ID
-    // matches extended_entities.media[].id_str exactly, so it's a more reliable way
-    // to identify "which video is this" than DOM-order heuristics when available.
+    // Extracts a video's own key from its poster thumbnail URL: the numeric media ID
+    // (.../amplify_video_thumb/{id}/...) or, for GIFs, the file name. It matches
+    // extended_entities.media[].id_str and the video file's own path exactly, so it's
+    // a more reliable way to identify "which video is this" than DOM-order heuristics.
     getPosterMediaId(videoComp) {
-      const posterUrl = videoComp.querySelector('video')?.poster || videoComp.querySelector('img')?.src;
+      const posterUrl = videoComp.poster || videoComp.querySelector('video')?.poster || videoComp.querySelector('img')?.src;
       if (!posterUrl) return null;
-      const match = posterUrl.match(/\/(?:ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb)\/(\d+)\//);
+      const match = posterUrl.match(CONFIG.PATTERNS.POSTER_ID) || posterUrl.match(CONFIG.PATTERNS.POSTER_GIF);
       return match ? match[1] : null;
+    },
+
+    // Reads the caches only. Returns { url, id } or null. A file the player loaded is a
+    // last resort: it is only consulted when `allowObserved` is set, after every
+    // source of real tweet data has already been tried.
+    lookupVideo(videoComp, slotIndex, allowObserved = false) {
+      const tweetId = this.getTweetIdCandidates(videoComp)[0] || null;
+      const posterKey = this.getPosterMediaId(videoComp);
+      // The poster key can name the file when the tweet ID can't be found.
+      const id = tweetId || posterKey;
+      if (!id) return null;
+
+      // Tier 1: match by the video's own key read from its poster thumbnail.
+      // Most reliable — independent of render order or tweet ID discovery.
+      if (posterKey && State.videoCache.has(posterKey)) {
+        return { url: State.videoCache.get(posterKey), id };
+      }
+
+      // Tier 2: composite tweetId-slotIndex, correlated via DOM/API render order.
+      const exactKey = `${tweetId}-${slotIndex}`;
+      if (tweetId && State.videoCache.has(exactKey)) {
+        return { url: State.videoCache.get(exactKey), id };
+      }
+
+      // Tier 3: a full MP4 the player itself loaded, matched by the same media key.
+      const observed = allowObserved && posterKey ? State.observedVideos.get(posterKey) : null;
+      if (observed) return { url: observed.url, id };
+
+      // Tier 4: last resort — grab slot 0 rather than failing when SOME video
+      // for this tweet did make it into the cache.
+      const fallbackKey = `${tweetId}-0`;
+      if (tweetId && State.videoCache.has(fallbackKey)) {
+        Utils.log(`No exact match for ${exactKey} (poster key: ${posterKey}), falling back to ${fallbackKey}`);
+        return { url: State.videoCache.get(fallbackKey), id };
+      }
+
+      return null;
+    },
+
+    // Runs one lookup source against every candidate tweet ID, re-checking the
+    // caches after each so it stops as soon as the video turns up.
+    async tryLookupSource(videoComp, slotIndex, tweetIds, source) {
+      for (const tweetId of tweetIds) {
+        try {
+          await source(tweetId);
+        } catch (e) {
+          Utils.log('Lookup source failed', tweetId, e);
+        }
+        const found = this.lookupVideo(videoComp, slotIndex);
+        if (found) return found;
+      }
+      return null;
+    },
+
+    // Caches first; then Twitter's public syndication endpoint; then the page's own
+    // logged-in API; finally any full MP4 the player loaded. Never throws — resolves
+    // null when every source comes up empty.
+    async resolveVideo(videoComp, slotIndex) {
+      const cached = this.lookupVideo(videoComp, slotIndex);
+      if (cached) return cached;
+
+      const tweetIds = this.getTweetIdCandidates(videoComp);
+      if (!tweetIds.length) return this.lookupVideo(videoComp, slotIndex, true);
+
+      Utils.showToast(CONFIG.MESSAGES.LOOKING_UP);
+      const sources = [
+        (id) => Interceptor.fetchSyndication(id),
+        (id) => Interceptor.fetchAuthenticated(id),
+        (id) => Interceptor.fetchMirror(id)
+      ];
+      for (const source of sources) {
+        const found = await this.tryLookupSource(videoComp, slotIndex, tweetIds, source);
+        if (found) return found;
+      }
+      return this.lookupVideo(videoComp, slotIndex, true);
     },
 
     fetchAndSaveBlob(url, filename, onProgress) {
@@ -210,9 +378,28 @@
   // 4. NETWORK & JSON INTERCEPTION
   // ==========================================================================
   const Interceptor = {
-    init() {
-      this.parseInitialDOMState();
+    // Hooks go in immediately (document-start) so early requests aren't missed.
+    installHooks() {
       this.hookXHR();
+      this.hookFetch();
+      this.observeResourceRequests();
+    },
+
+    isApiUrl(url) {
+      const text = String(url || '');
+      return CONFIG.API_URL_PATTERNS.some(pattern => text.includes(pattern));
+    },
+
+    // Skips the expensive parse for the vast majority of responses that carry no video.
+    ingestText(text) {
+      State.stats.responsesSeen++;
+      if (!text || !text.includes('video_info')) return;
+      State.stats.responsesWithVideo++;
+      try {
+        this.extractVideos(JSON.parse(text));
+      } catch (e) {
+        Utils.log('JSON parse error on network intercept');
+      }
     },
 
     parseInitialDOMState() {
@@ -233,22 +420,304 @@
       }
     },
 
-    hookXHR() {
-      const originalOpen = XMLHttpRequest.prototype.open;
-      const self = this;
-      XMLHttpRequest.prototype.open = function (method, url) {
-        this.addEventListener('readystatechange', function () {
-          if (this.readyState !== 4 || !this.responseText) return;
-          if (!url.includes('TweetDetail') && !url.includes('UserBy') && !url.includes('Timeline')) return;
+    readHeader(headers, name) {
+      if (!headers) return null;
+      if (typeof headers.get === 'function') return headers.get(name);
+      if (Array.isArray(headers)) {
+        const pair = headers.find(([key]) => String(key).toLowerCase() === name);
+        return pair ? pair[1] : null;
+      }
+      const key = Object.keys(headers).find(k => k.toLowerCase() === name);
+      return key ? headers[key] : null;
+    },
 
-          try {
-            self.extractVideos(JSON.parse(this.responseText));
-          } catch (e) {
-            Utils.log('JSON parse error on XHR intercept');
-          }
-        });
-        originalOpen.apply(this, arguments);
+    // Copies the page's own login header and tweet-data request URL so they can be
+    // replayed (to Twitter only) for a tweet the page never loaded.
+    rememberRequest(url, headers) {
+      const text = String(url || '');
+      if (!text.includes('/i/api/')) return;
+
+      const bearer = this.readHeader(headers, 'authorization');
+      if (bearer) State.auth.bearer = bearer;
+
+      const match = text.match(CONFIG.PATTERNS.API_TEMPLATE);
+      if (!match) return;
+      try {
+        State.auth.templates[match[1]] = new URL(text, window.location.origin).href;
+      } catch (e) {
+        Utils.log('Could not remember request template', e);
+      }
+    },
+
+    hookXHR() {
+      const proto = pageWindow.XMLHttpRequest.prototype;
+      const originalOpen = proto.open;
+      const originalSetHeader = proto.setRequestHeader;
+      const self = this;
+
+      proto.open = function (method, url) {
+        self.rememberRequest(url, null);
+        if (self.isApiUrl(url)) {
+          this.addEventListener('readystatechange', function () {
+            if (this.readyState !== 4) return;
+            // responseText throws for non-text response types.
+            if (this.responseType && this.responseType !== 'text') return;
+            self.ingestText(this.responseText);
+          });
+        }
+        return originalOpen.apply(this, arguments);
       };
+
+      proto.setRequestHeader = function (name, value) {
+        if (String(name).toLowerCase() === 'authorization' && /^Bearer /i.test(String(value))) {
+          State.auth.bearer = value;
+        }
+        return originalSetHeader.apply(this, arguments);
+      };
+    },
+
+    hookFetch() {
+      const originalFetch = pageWindow.fetch;
+      if (typeof originalFetch !== 'function') return;
+      State.originalFetch = originalFetch;
+      const self = this;
+      pageWindow.fetch = function (input, init) {
+        const url = typeof input === 'string' ? input : (input && input.url) || String(input);
+        self.rememberRequest(url, (init && init.headers) || (input && input.headers));
+
+        const request = originalFetch.apply(this, arguments);
+        if (self.isApiUrl(url)) {
+          // Reads a clone so the page's own response stays untouched.
+          request
+            .then(res => res.clone().text())
+            .then(text => self.ingestText(text))
+            .catch(() => Utils.log('Could not read fetch response'));
+        }
+        return request;
+      };
+    },
+
+    // Passive and independent of the hooks above: Resource Timing lists every request the
+    // page makes. Video files the <video> tag hides behind a blob: address show up here,
+    // and so do the full addresses of the page's own tweet-data requests.
+    observeResourceRequests() {
+      if (typeof PerformanceObserver === 'undefined') return;
+      try {
+        const observer = new PerformanceObserver((list) => {
+          list.getEntries().forEach(entry => {
+            this.recordObservedVideo(entry.name);
+            this.rememberRequest(entry.name, null);
+          });
+        });
+        observer.observe({ type: 'resource', buffered: true });
+      } catch (e) {
+        Utils.log('Resource observer unavailable', e);
+      }
+    },
+
+    // Keeps only complete progressive files. Streaming pieces (including the picture-less
+    // init ".mp4") and files with no resolution in their path are skipped.
+    recordObservedVideo(url) {
+      const match = url.match(CONFIG.PATTERNS.OBSERVED_VIDEO);
+      if (!match || CONFIG.PATTERNS.STREAM_SEGMENT.test(url)) return;
+
+      const key = match[1] || match[2];
+      const size = url.match(CONFIG.PATTERNS.VIDEO_RESOLUTION);
+      const isGif = !!match[2];
+      if (!size && !isGif) return;
+      const area = size ? Number(size[1]) * Number(size[2]) : 0;
+
+      const known = State.observedVideos.get(key);
+      if (known && known.area >= area) return;
+
+      if (State.observedVideos.size >= CONFIG.MAX_CACHE_SIZE) {
+        State.observedVideos.delete(State.observedVideos.keys().next().value);
+      }
+      State.observedVideos.set(key, { url, area });
+      Utils.log('Captured video file', key, url);
+    },
+
+    // Cross-origin GET through the userscript manager, so CORS never gets in the way.
+    gmGetText(url, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest === 'undefined') {
+          return reject(new Error('GM_xmlhttpRequest not available'));
+        }
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url,
+          responseType: 'text',
+          timeout: timeoutMs,
+          onload: (res) => {
+            if (res.status >= 200 && res.status < 300) resolve(res.responseText);
+            else reject(new Error(`HTTP Error ${res.status}`));
+          },
+          onerror: (err) => reject(err),
+          ontimeout: () => reject(new Error('Network Timeout'))
+        });
+      });
+    },
+
+    // Public, login-free endpoint used when the intercepted data missed a tweet.
+    syndicationToken(tweetId) {
+      return ((Number(tweetId) / 1e15) * Math.PI).toString(36).replace(/(0+|\.)/g, '');
+    },
+
+    // Reads every full video file address out of a mirror reply. A regex over the raw
+    // text keeps this independent of each mirror's differing JSON layout.
+    // Keeps the largest picture per media ID, then also files them by slot order.
+    ingestMirrorText(tweetId, text) {
+      const best = new Map();
+      const matches = text.replace(/\\\//g, '/').match(CONFIG.MIRROR_VIDEO_URL) || [];
+      for (const url of matches) {
+        if (CONFIG.PATTERNS.STREAM_SEGMENT.test(url)) continue;
+        const key = url.match(CONFIG.PATTERNS.OBSERVED_VIDEO);
+        const id = key && (key[1] || key[2]);
+        if (!id) continue;
+        const size = url.match(CONFIG.PATTERNS.VIDEO_RESOLUTION);
+        const area = size ? Number(size[1]) * Number(size[2]) : 0;
+        if (!best.has(id) || area > best.get(id).area) best.set(id, { url, area });
+      }
+      let slot = 0;
+      for (const [id, { url }] of best) {
+        State.videoCache.set(id, url);
+        State.videoCache.set(`${tweetId}-${slot++}`, url);
+      }
+      Utils.log('Mirror lookup found', best.size, 'video(s) for', tweetId);
+      return best.size;
+    },
+
+    // Last resort: public mirrors that read tweets with their own sessions, so they can
+    // see videos Twitter hides from logged-out viewers. Tries each mirror in turn.
+    async fetchMirror(tweetId) {
+      if (!CONFIG.ENABLE_MIRROR_LOOKUP) return;
+      for (const base of CONFIG.MIRROR_URLS) {
+        try {
+          const text = await this.gmGetText(base + tweetId, CONFIG.MIRROR_TIMEOUT_MS);
+          if (this.ingestMirrorText(tweetId, text)) return;
+        } catch (e) {
+          Utils.log('Mirror lookup failed', base, e);
+        }
+      }
+    },
+
+    fetchSyndication(tweetId) {
+      if (State.syndicationRequests.has(tweetId)) return State.syndicationRequests.get(tweetId);
+
+      const url = `${CONFIG.SYNDICATION_URL}?id=${tweetId}&lang=en&token=${this.syndicationToken(tweetId)}`;
+      const request = this.gmGetText(url, CONFIG.SYNDICATION_TIMEOUT_MS)
+        .then(text => {
+          const data = JSON.parse(text);
+          this.extractVideos({ id_str: tweetId, extended_entities: { media: data.mediaDetails || [] } });
+        })
+        .finally(() => State.syndicationRequests.delete(tweetId));
+
+      State.syndicationRequests.set(tweetId, request);
+      return request;
+    },
+
+    // Twitter's web client carries one public token in its own script bundle. If no page
+    // request exposed it, read it from there (once; the result is kept for the session).
+    discoverBearer() {
+      if (State.auth.bearer) return Promise.resolve();
+      if (State.bearerDiscovery) return State.bearerDiscovery;
+
+      const bundles = Array.from(document.scripts)
+        .map(script => script.src)
+        .filter(src => CONFIG.PATTERNS.BUNDLE_URL.test(src))
+        .sort((a, b) => Number(/main\./.test(b)) - Number(/main\./.test(a)))
+        .slice(0, CONFIG.MAX_BUNDLE_FETCHES);
+
+      State.bearerDiscovery = (async () => {
+        for (const src of bundles) {
+          try {
+            const token = (await this.gmGetText(src, CONFIG.BUNDLE_TIMEOUT_MS)).match(CONFIG.PATTERNS.BEARER_TOKEN);
+            if (token) {
+              State.auth.bearer = `Bearer ${token[0]}`;
+              return;
+            }
+          } catch (e) {
+            Utils.log('Could not read script bundle', src, e);
+          }
+        }
+      })().finally(() => { State.bearerDiscovery = null; });
+
+      return State.bearerDiscovery;
+    },
+
+    // Rewrites a remembered page request so it asks for another tweet.
+    rewriteTemplate(templateUrl, tweetId) {
+      try {
+        const url = new URL(templateUrl);
+        const variables = JSON.parse(url.searchParams.get('variables') || '{}');
+        if ('focalTweetId' in variables) variables.focalTweetId = tweetId;
+        else if ('tweetId' in variables) variables.tweetId = tweetId;
+        else return null;
+        url.searchParams.set('variables', JSON.stringify(variables));
+        return url.href;
+      } catch (e) {
+        return null;
+      }
+    },
+
+    buildAuthenticatedUrls(tweetId) {
+      const urls = Object.values(State.auth.templates)
+        .map(template => this.rewriteTemplate(template, tweetId))
+        .filter(Boolean);
+      urls.push(`${window.location.origin}${CONFIG.LEGACY_STATUS_PATH}?id=${tweetId}&tweet_mode=extended`);
+      return urls;
+    },
+
+    // Same-origin request that mimics the page's own, so it carries the viewer's session.
+    async fetchWithSession(url) {
+      const csrf = document.cookie.match(/(?:^|;\s*)ct0=([^;]+)/)?.[1];
+      const doFetch = State.originalFetch || pageWindow.fetch;
+      const res = await doFetch.call(pageWindow, url, {
+        credentials: 'include',
+        headers: {
+          authorization: State.auth.bearer,
+          'x-csrf-token': csrf || '',
+          'x-twitter-active-user': 'yes',
+          'x-twitter-auth-type': 'OAuth2Session',
+          'x-twitter-client-language': 'en'
+        }
+      });
+      if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+      this.ingestText(await res.text());
+    },
+
+    // Asks Twitter as the logged-in viewer, which reaches tweets the public endpoint
+    // hides (sensitive, age-restricted).
+    async fetchAuthenticated(tweetId) {
+      await this.discoverBearer();
+      if (!State.auth.bearer) throw new Error('No login header available');
+
+      for (const url of this.buildAuthenticatedUrls(tweetId)) {
+        try {
+          await this.fetchWithSession(url);
+        } catch (e) {
+          Utils.log('Authenticated lookup failed', url, e);
+        }
+      }
+    },
+
+    setCache(key, url) {
+      if (State.videoCache.size >= CONFIG.MAX_CACHE_SIZE) {
+        State.videoCache.delete(State.videoCache.keys().next().value);
+      }
+      State.videoCache.set(key, url);
+    },
+
+    isVideoMedia(media) {
+      return (media.type === 'video' || media.type === 'animated_gif') && Array.isArray(media.video_info?.variants);
+    },
+
+    // Prefers real MP4 files (HLS playlists can't be saved as a single file), highest bitrate first.
+    pickBestVariantUrl(variants) {
+      const mp4 = variants.filter(v => v.url && v.content_type === 'video/mp4');
+      const pool = mp4.length ? mp4 : variants.filter(v => v.url);
+      const best = [...pool].sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+      return best ? best.url : null;
     },
 
     extractVideos(rootObj) {
@@ -262,36 +731,29 @@
         if (!obj || typeof obj !== 'object') continue;
 
         if (obj.extended_entities?.media) {
-          const id = obj.id_str;
+          const tweetId = obj.id_str;
           let videoSlot = 0;
           obj.extended_entities.media.forEach(media => {
-            if ((media.type === 'video' || media.type === 'animated_gif') && media.video_info) {
-              const variants = media.video_info.variants;
-              const best = variants.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-              if (best && id) {
-                if (State.videoCache.size >= CONFIG.MAX_CACHE_SIZE) {
-                  State.videoCache.delete(State.videoCache.keys().next().value);
-                }
-                // Primary key: the media item's own unique id_str. This is the most
-                // reliable lookup since it can be cross-referenced directly from the
-                // poster thumbnail URL on the DOM side — no ordering assumptions needed.
-                if (media.id_str) State.videoCache.set(media.id_str, best.url);
-                // Secondary key (tweetId-slotIndex): fallback for when the poster URL
-                // can't be read yet (e.g. video hasn't rendered a thumbnail).
-                State.videoCache.set(`${id}-${videoSlot}`, best.url);
-              }
-              videoSlot++;
+            if (!this.isVideoMedia(media)) return;
+            const url = this.pickBestVariantUrl(media.video_info.variants);
+            if (url) {
+              // Primary key: the media item's own unique id_str. It can be
+              // cross-referenced directly from the poster thumbnail URL on the DOM
+              // side — no ordering assumptions needed.
+              if (media.id_str) this.setCache(media.id_str, url);
+              // Secondary key (tweetId-slotIndex): fallback for when the poster URL
+              // can't be read yet (e.g. video hasn't rendered a thumbnail).
+              if (tweetId) this.setCache(`${tweetId}-${videoSlot}`, url);
             }
+            videoSlot++;
           });
         }
 
         for (const [key, val] of Object.entries(obj)) {
           if (CONFIG.IGNORED_JSON_KEYS.has(key)) continue;
-          if (val && typeof val === 'object') {
-            if (!seen.has(val)) {
-              seen.add(val);
-              queue.push(val);
-            }
+          if (val && typeof val === 'object' && !seen.has(val)) {
+            seen.add(val);
+            queue.push(val);
           }
         }
       }
@@ -334,7 +796,10 @@
             transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
-        .xiv-wrap:hover > .xiv-btn-container,
+        /* Keyed on the hovered parent rather than .xiv-wrap so the buttons still
+           show if React strips our wrapper class during a re-render. The Hover
+           module adds .xiv-visible for media covered by transparent overlays. */
+        *:hover > .xiv-btn-container,
         .xiv-btn-container:hover,
         .xiv-btn-container.xiv-visible {
             visibility: visible;
@@ -342,7 +807,7 @@
             transition: visibility 0s;
         }
 
-        .xiv-wrap:hover > .xiv-btn-container::before,
+        *:hover > .xiv-btn-container::before,
         .xiv-btn-container:hover::before,
         .xiv-btn-container.xiv-visible::before {
             opacity: 1;
@@ -388,7 +853,7 @@
                 background 0.35s ease;
         }
 
-        .xiv-wrap:hover .xiv-action-btn,
+        *:hover > .xiv-btn-container .xiv-action-btn,
         .xiv-btn-container.xiv-visible .xiv-action-btn {
             opacity: 1;
         }
@@ -397,7 +862,7 @@
             cursor: default !important;
         }
 
-        .xiv-wrap:hover .xiv-action-btn[data-loading="1"],
+        *:hover > .xiv-btn-container .xiv-action-btn[data-loading="1"],
         .xiv-btn-container.xiv-visible .xiv-action-btn[data-loading="1"] {
             opacity: 0.8 !important;
         }
@@ -695,33 +1160,54 @@
           delete btnEl.dataset.loading;
         }, 1000);
       }
+    },
+
+    // Resolves a video's URL (caches, then syndication, then the logged-in API, then
+    // a file the player loaded) and hands it to `onData`. The resolving flag stops
+    // repeat clicks from stacking lookups.
+    async withVideoData(btnEl, videoComp, onData) {
+      if (btnEl.dataset.resolving === "1") return;
+      btnEl.dataset.resolving = "1";
+      try {
+        const slotIndex = Media.getVideoSlotIndex(videoComp);
+        const data = await Media.resolveVideo(videoComp, slotIndex);
+        if (data) onData(data, slotIndex);
+        else Utils.showToast(CONFIG.MESSAGES.VIDEO_NOT_FOUND);
+      } catch (e) {
+        Utils.log('Video resolution failed', e);
+        Utils.showToast(CONFIG.MESSAGES.VIDEO_NOT_FOUND);
+      } finally {
+        delete btnEl.dataset.resolving;
+      }
     }
   };
 
   const DOM = {
-    // Filters raw SELECTORS.VIDEO matches down to "leaf" nodes only — matches that
-    // don't themselves contain another match. Twitter sometimes wraps a multi-video
-    // grid in one shared testid container with individual per-video players nested
-    // inside; without this filter, the shared outer wrapper would be treated as an
-    // extra "video" and every real video would resolve back to that same wrapper.
-    getLeafVideoNodes(scopeEl) {
-      const matches = Array.from(scopeEl.querySelectorAll(CONFIG.SELECTORS.VIDEO));
-      return matches.filter(node => !matches.some(other => other !== node && node.contains(other)));
+    // A container is healthy only if it is still attached, still lives in an
+    // ancestor of its media, and that ancestor still carries our wrapper class.
+    // React re-renders (e.g. closing the expanded photo view) can drop any of these
+    // while the media element itself survives.
+    isInjected(el) {
+      const container = State.containers.get(el);
+      if (!container || !container.isConnected) return false;
+      const parent = container.parentElement;
+      return !!parent && parent.contains(el) && parent.classList.contains(CONFIG.CLASSES.WRAPPER);
     },
 
-    // Picks where to mount a video's button container. Prefers the nearest
-    // SAFE_PARENT ancestor for nicer positioning/clipping, but only if that ancestor
-    // wraps exactly one video — otherwise it's a shared grid wrapper, and mounting
-    // there would stack every video's buttons on top of each other at the same spot.
-    findSafeParent(videoComp) {
-      const candidate = videoComp.closest(CONFIG.SELECTORS.SAFE_PARENT) || videoComp.parentElement;
-      if (candidate && candidate.querySelectorAll(CONFIG.SELECTORS.VIDEO).length > 1) {
-        return videoComp;
-      }
-      return candidate || videoComp;
+    removeStaleContainer(el) {
+      const stale = State.containers.get(el);
+      if (!stale) return;
+      stale.remove();
+      State.containers.delete(el);
     },
 
-    mountContainer(safeParent, positionClass, insertAfterTarget = null) {
+    // Records the media <-> container pairing used by injection checks and hover.
+    registerContainer(media, container) {
+      State.containers.set(media, container);
+      State.owners.set(container, media);
+    },
+
+    mountContainer(safeParent, positionClass, kind, insertAfterTarget = null) {
       if (!safeParent) return null;
 
       safeParent.classList.add(CONFIG.CLASSES.WRAPPER);
@@ -731,6 +1217,7 @@
 
       const container = document.createElement('div');
       container.className = `${CONFIG.CLASSES.CONTAINER} ${positionClass}`;
+      container.dataset.xivKind = kind;
 
       if (insertAfterTarget) {
         insertAfterTarget.insertAdjacentElement('afterend', container);
@@ -744,12 +1231,22 @@
     injectImageButtons(img) {
       const w = img.naturalWidth || img.getBoundingClientRect().width || 0;
       const h = img.naturalHeight || img.getBoundingClientRect().height || 0;
-      if (w < CONFIG.MIN_SIZE || h < CONFIG.MIN_SIZE) return;
+      if (w < CONFIG.MIN_SIZE || h < CONFIG.MIN_SIZE) {
+        // Only remember "too small" once loaded; an unloaded image reports 0x0 and must be retried.
+        if (img.complete) State.skipped.set(img, img.src);
+        return;
+      }
+
+      this.removeStaleContainer(img);
+      // If React swapped the <img> but left our old container behind, it sits right after the new image.
+      const next = img.nextElementSibling;
+      if (next && next.matches(CONFIG.SELECTORS.CONTAINER_IMAGE)) next.remove();
 
       const isProfile = img.src.includes('profile_images');
       const container = this.mountContainer(
         img.parentElement,
         isProfile ? CONFIG.CLASSES.POS_CENTER_BOT : CONFIG.CLASSES.POS_LEFT,
+        CONFIG.KINDS.IMAGE,
         img
       );
       if (!container) return;
@@ -766,97 +1263,181 @@
 
       container.appendChild(openBtn);
       container.appendChild(dlBtn);
+      this.registerContainer(img, container);
     },
 
     injectVideoButtons(videoComp) {
-      const safeParent = this.findSafeParent(videoComp);
-      const container = this.mountContainer(safeParent, CONFIG.CLASSES.POS_RIGHT);
+      this.removeStaleContainer(videoComp);
+
+      // Each <video> sits in its own wrapper that is already position: relative.
+      const mountPoint = videoComp.parentElement;
+      if (!mountPoint) return;
+
+      // Containers directly under the wrapper belong to this one video, so
+      // leftovers from a replaced player can go.
+      mountPoint.querySelectorAll(`:scope > ${CONFIG.SELECTORS.CONTAINER_VIDEO}`).forEach(node => node.remove());
+
+      const container = this.mountContainer(mountPoint, CONFIG.CLASSES.POS_RIGHT, CONFIG.KINDS.VIDEO);
       if (!container) return;
 
-      const slotIndex = Media.getVideoSlotIndex(videoComp);
+      const openBtn = UI.createButton('Open Video', ICONS.PLAY, (btn, icon) =>
+        Handlers.withVideoData(btn, videoComp, (data) =>
+          Handlers.handleOpen(btn, icon, data.url, ICONS.PLAY)
+        )
+      );
 
-      const getUrlData = () => {
-        const id = Media.getTweetId(videoComp);
-        if (!id) return null;
-
-        // Tier 1: match by the video's own media ID read from its poster thumbnail.
-        // Most reliable — independent of render order or grid structure.
-        const posterMediaId = Media.getPosterMediaId(videoComp);
-        if (posterMediaId && State.videoCache.has(posterMediaId)) {
-          return { url: State.videoCache.get(posterMediaId), id };
-        }
-
-        // Tier 2: composite tweetId-slotIndex, correlated via DOM/API render order.
-        const exactKey = `${id}-${slotIndex}`;
-        if (State.videoCache.has(exactKey)) {
-          return { url: State.videoCache.get(exactKey), id };
-        }
-
-        // Tier 3: last resort — grab slot 0 rather than showing "not cached"
-        // when SOME video for this tweet did make it into the cache.
-        const fallbackKey = `${id}-0`;
-        if (State.videoCache.has(fallbackKey)) {
-          Utils.log(`No exact match for ${exactKey} (poster id: ${posterMediaId}), falling back to ${fallbackKey}`);
-          return { url: State.videoCache.get(fallbackKey), id };
-        }
-
-        return null;
-      };
-
-      const openBtn = UI.createButton('Open Video', ICONS.PLAY, (btn, icon) => {
-        const data = getUrlData();
-        if (data) Handlers.handleOpen(btn, icon, data.url, ICONS.PLAY);
-        else Utils.showToast('Video URL not cached. Try playing it for a second.');
-      });
-
-      const dlBtn = UI.createButton('Download MP4', ICONS.DOWNLOAD, (btn, icon) => {
-        const data = getUrlData();
-        if (data) Handlers.handleDownload(btn, icon, data.url, `x-vid-${data.id}-${slotIndex}.mp4`, ICONS.DOWNLOAD);
-        else Utils.showToast('Video URL not cached. Try playing it for a second.');
-      });
+      const dlBtn = UI.createButton('Download MP4', ICONS.DOWNLOAD, (btn, icon) =>
+        Handlers.withVideoData(btn, videoComp, (data, slotIndex) =>
+          Handlers.handleDownload(btn, icon, data.url, `x-vid-${data.id}-${slotIndex}.mp4`, ICONS.DOWNLOAD)
+        )
+      );
 
       container.appendChild(openBtn);
       container.appendChild(dlBtn);
+      this.registerContainer(videoComp, container);
+    },
+
+    // Sends a media element to the IntersectionObserver unless it already has
+    // working buttons, is already waiting, or was judged too small at this src.
+    queueForInjection(el) {
+      if (State.pending.has(el) || this.isInjected(el)) return;
+      if (el.src && State.skipped.get(el) === el.src) return;
+      State.pending.add(el);
+      State.observer.observe(el);
     },
 
     scan() {
-      const rawImgs = Array.from(document.querySelectorAll(CONFIG.SELECTORS.IMG));
-      const rawVideos = this.getLeafVideoNodes(document);
-
-      rawImgs.forEach(img => {
-        if (img.dataset.xivObserved || CONFIG.EXCLUDE_URLS.some(p => img.src.includes(p))) return;
-        img.dataset.xivObserved = 'true';
-        State.observer.observe(img);
+      document.querySelectorAll(CONFIG.SELECTORS.IMG).forEach(img => {
+        if (CONFIG.EXCLUDE_URLS.some(p => img.src.includes(p))) return;
+        this.queueForInjection(img);
       });
 
-      rawVideos.forEach(vid => {
-        if (vid.dataset.xivObserved) return;
-        vid.dataset.xivObserved = 'true';
-        State.observer.observe(vid);
+      document.querySelectorAll(CONFIG.SELECTORS.VIDEO).forEach(vid => this.queueForInjection(vid));
+    }
+  };
+
+  // Shows a media's buttons whenever the pointer is over it, even when a
+  // transparent overlay (e.g. the Play button layer on an unplayed video) sits on
+  // top, or the media itself ignores pointer events, either of which stops CSS
+  // :hover from reaching the media's own parent.
+  const Hover = {
+    frame: 0,
+    x: 0,
+    y: 0,
+
+    init() {
+      const schedule = () => {
+        if (!this.frame) this.frame = requestAnimationFrame(() => this.update());
+      };
+      document.addEventListener('pointermove', (e) => {
+        this.x = e.clientX;
+        this.y = e.clientY;
+        schedule();
+      }, { passive: true });
+      // Scrolling moves media under a stationary pointer without any pointermove.
+      document.addEventListener('scroll', schedule, { passive: true, capture: true });
+      document.documentElement.addEventListener('pointerleave', () => this.apply(new Set()));
+    },
+
+    containsPoint(rect) {
+      return rect.width > 0 && rect.height > 0
+        && this.x >= rect.left && this.x <= rect.right
+        && this.y >= rect.top && this.y <= rect.bottom;
+    },
+
+    // Media under a modal (e.g. the expanded photo view) must not light up, so a
+    // tweet's media only counts when the topmost element is inside that same tweet.
+    isReachable(media, topEl) {
+      const scope = media.closest(CONFIG.SELECTORS.TWEET);
+      return !scope || scope.contains(topEl);
+    },
+
+    // Hit-testing path: covers media that is not inside a tweet (e.g. the expanded photo view).
+    collectFromStack(stack, next) {
+      stack.forEach(el => {
+        const container = State.containers.get(el);
+        if (container && container.isConnected && this.isReachable(el, stack[0])) next.add(container);
       });
+    },
+
+    // Geometry path: covers media that ignores pointer events and so never shows up in the stack.
+    collectFromRects(topEl, next) {
+      const scope = topEl.closest(CONFIG.SELECTORS.TWEET);
+      if (!scope) return;
+      scope.querySelectorAll(CONFIG.SELECTORS.CONTAINER).forEach(container => {
+        const media = State.owners.get(container);
+        if (media && this.containsPoint(media.getBoundingClientRect())) next.add(container);
+      });
+    },
+
+    update() {
+      this.frame = 0;
+      const stack = document.elementsFromPoint(this.x, this.y);
+      const next = new Set();
+      if (stack.length) {
+        this.collectFromStack(stack, next);
+        this.collectFromRects(stack[0], next);
+      }
+      this.apply(next);
+    },
+
+    apply(next) {
+      State.hovered.forEach(container => {
+        if (!next.has(container)) container.classList.remove(CONFIG.CLASSES.VISIBLE);
+      });
+      next.forEach(container => container.classList.add(CONFIG.CLASSES.VISIBLE));
+      State.hovered = next;
     }
   };
 
   // ==========================================================================
   // 7. INITIALIZATION
   // ==========================================================================
+  // Network hooks go in right away so the page's earliest requests are seen.
+  Interceptor.installHooks();
+
+  function registerMenuCommands() {
+    if (typeof GM_registerMenuCommand === 'undefined') return;
+
+    GM_registerMenuCommand('🧹 Clear Video Cache', () => {
+      State.videoCache.clear();
+      State.observedVideos.clear();
+      Utils.showToast('Video cache cleared!');
+    });
+    GM_registerMenuCommand('🔍 Force DOM Scan', () => { DOM.scan(); Utils.showToast('Forced DOM scan complete!'); });
+    GM_registerMenuCommand('🐛 Toggle Debug Mode', () => { CONFIG.DEBUG = !CONFIG.DEBUG; Utils.showToast(`Debug mode ${CONFIG.DEBUG ? 'ON' : 'OFF'}`); });
+    GM_registerMenuCommand('📋 Log Captured Videos', () => {
+      console.log('[Media Extractor] Status:', {
+        ...State.stats,
+        cachedVideos: State.videoCache.size,
+        observedFiles: State.observedVideos.size,
+        loginHeaderFound: !!State.auth.bearer,
+        capturedRequestTemplates: Object.keys(State.auth.templates),
+        hookedPageWindow: pageWindow !== window
+      });
+      console.log('[Media Extractor] API data:', Object.fromEntries(State.videoCache));
+      console.log('[Media Extractor] Files the player loaded:', Object.fromEntries(State.observedVideos));
+      Utils.showToast('Captured videos logged to the console.');
+    });
+  }
+
   function init() {
     UI.injectStyles();
-    Interceptor.init();
-
-    if (typeof GM_registerMenuCommand !== 'undefined') {
-      GM_registerMenuCommand('🧹 Clear Video Cache', () => { State.videoCache.clear(); Utils.showToast('Video cache cleared!'); });
-      GM_registerMenuCommand('🔍 Force DOM Scan', () => { DOM.scan(); Utils.showToast('Forced DOM scan complete!'); });
-      GM_registerMenuCommand('🐛 Toggle Debug Mode', () => { CONFIG.DEBUG = !CONFIG.DEBUG; Utils.showToast(`Debug mode ${CONFIG.DEBUG ? 'ON' : 'OFF'}`); });
-    }
+    Interceptor.parseInitialDOMState();
+    Hover.init();
+    registerMenuCommands();
 
     State.observer = new IntersectionObserver((entries, obs) => {
       entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          if (entry.target.matches(CONFIG.SELECTORS.IMG)) DOM.injectImageButtons(entry.target);
-          else DOM.injectVideoButtons(entry.target);
-          obs.unobserve(entry.target);
-        }
+        if (!entry.isIntersecting) return;
+
+        const target = entry.target;
+        obs.unobserve(target);
+        State.pending.delete(target);
+        if (DOM.isInjected(target)) return;
+
+        if (target.matches(CONFIG.SELECTORS.IMG)) DOM.injectImageButtons(target);
+        else DOM.injectVideoButtons(target);
       });
     }, { rootMargin: '400px' });
 
