@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      11.5
+// @version      11.7
 // @description  Displays multi-image posts on X (Twitter) in their full original proportions without cropped edges.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -43,7 +43,7 @@
             TARGET_PER_ROW: 3,             // preferred photos per row for large sets
             FLEX_MULTIPLIER: 10000,
             GAP: '0.125rem',
-            MARGIN_TOP: '0.75rem',
+            MARGIN_TOP: '0',               // X's post column already spaces its children 0.75rem apart
             BORDER_WIDTH: '0.0625rem',
             BORDER_RADIUS: 'clamp(0.5rem, 1vw, 0.875rem)',
             BORDER_COLOR: 'rgba(128, 128, 128, 0.15)',
@@ -70,11 +70,14 @@
 
         // Selectors
         SELECTORS: {
-            PHOTO: 'div[data-testid="tweetPhoto"]',
+            // X removed its data-testid attributes, so photos are found by the
+            // link to the full-size photo view, which both old and new layouts have
+            PHOTO: 'a[href*="/photo/"]',
             VIDEO_OR_GIF: 'video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="playButton"]',
             ARTICLE_TAG: 'ARTICLE',
-            TWEET_WRAPPER: '[data-testid="tweet"]',
-            TEXT_MARKERS: '[data-testid="tweetText"], [data-testid="User-Name"], time'
+            TWEET_WRAPPER: '[data-testid="tweet"], article',
+            // Anything that proves a container holds more than just the photos
+            TEXT_MARKERS: '[data-testid="tweetText"], [data-testid="User-Name"], time, [dir="auto"]'
         },
 
         // CSS Classes
@@ -129,6 +132,11 @@
             if (!url) return null;
             try {
                 const u = new URL(url);
+                // X has no "orig" size for webp images; "large" (up to 2048px) is the best it serves
+                if (u.searchParams.get('format') === 'webp') {
+                    u.searchParams.set('name', 'large');
+                    return u.toString();
+                }
                 if (u.searchParams.has('name')) {
                     u.searchParams.set('name', 'orig');
                     return u.toString();
@@ -319,9 +327,19 @@
     // ASPECT LOADER (measures each image's width/height ratio)
     // ---------------------------------------------------------------
     const AspectLoader = {
+        // X now states each photo's real size in its width/height attributes, which is
+        // instant and avoids downloading the full-size image just to measure it
+        readDeclaredAspect(img) {
+            const ratio = Number(img.getAttribute('width')) / Number(img.getAttribute('height'));
+            return Utils.isValidAspect(ratio) ? ratio : null;
+        },
+
         // Resolves to a valid ratio, or null when it could not be measured
         measure(data) {
             const native = data.nativeImg;
+            const declared = native ? this.readDeclaredAspect(native) : null;
+            if (declared) return Promise.resolve(declared);
+
             if (native && native.naturalWidth > 0 && native.naturalHeight > 0) {
                 return Promise.resolve(native.naturalWidth / native.naturalHeight);
             }
@@ -427,6 +445,11 @@
             img.className = CONFIG.CLASSES.IMG;
             img.setAttribute('loading', 'lazy');
             img.setAttribute('decoding', 'async');
+
+            // If the enlarged address is refused, fall back to the address X itself loaded
+            img.onerror = () => {
+                if (data.fallbackSrc && img.src !== data.fallbackSrc) img.src = data.fallbackSrc;
+            };
 
             const setLoaded = () => img.classList.add(CONFIG.CLASSES.LOADED);
             if (isCached || (img.complete && img.naturalHeight !== 0)) {
@@ -644,6 +667,8 @@
             const roots = new Set();
             items.forEach(item => {
                 if (item.classList.contains(CONFIG.CLASSES.PROCESSED)) return;
+                // Photo links also appear outside posts (e.g. profile media grids), which must stay untouched
+                if (!item.closest(CONFIG.SELECTORS.TWEET_WRAPPER)) return;
                 const root = this.climbToMediaRoot(item);
                 if (this.isFreshRoot(root)) roots.add(root);
             });
@@ -677,6 +702,7 @@
                 return {
                     originalAnchor: item.closest('a') || item,
                     src: Utils.getHighResSrc(img.src),
+                    fallbackSrc: img.src,
                     alt: img.alt || '',
                     nativeImg: img
                 };
