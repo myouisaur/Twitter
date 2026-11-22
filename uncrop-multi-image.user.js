@@ -2,7 +2,7 @@
 // @name         [Twitter] Uncrop Multi-Image Layouts
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      12.1
+// @version      12.8
 // @description  Displays multi-image posts on X (Twitter) in their full original proportions without cropped edges.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -27,8 +27,13 @@
     const CONFIG = {
         // Feature Flags
         DEBUG: false,
+        KEEP_GRID_ON_RERENDER: true,       // put the grid straight back when X re-renders a post; false rebuilds it as in older versions
+        KEEP_QUOTE_THUMBNAILS: true,       // a quoted post's small side-by-side picture stays as X draws it; false rebuilds it too
         INCLUDE_VIDEO_TILES: true,         // show videos/GIFs as thumbnail tiles in mixed posts; false leaves those posts as X draws them
         OPEN_VIDEOS_VIA_PHOTO_VIEWER: true, // open a video through the normal photo viewer (normal /video/N link); false uses X's "View media" button
+        OPEN_VIDEOS_DIRECTLY: true,         // first try to open the video's own address straight away, before stepping through the neighbouring photo
+        COVER_VIEWER_WHILE_STEPPING: true,  // dark cover while the viewer is steered, so the neighbouring photo is never seen
+        TIDY_VIEWER_ADDRESS: true,          // show /video/N instead of X's mediaviewer address for videos opened with "View media"
 
         // Logging
         LOG_PREFIX: '[Twitter Uncrop]',
@@ -57,6 +62,7 @@
             BADGE_SIZE: '3rem',
             BADGE_BG: 'rgba(0, 0, 0, 0.6)',
             BADGE_BORDER: 'rgba(255, 255, 255, 0.9)',
+            CURTAIN_BG: 'rgba(0, 0, 0, 0.9)',
             VIDEO_ASPECT_SEARCH_DEPTH: 2   // how far above a video to look for its real shape; further out is X's cropped carousel box
         },
 
@@ -65,7 +71,8 @@
             RESIZE_DURATION_MS: 600,
             STAGGER_DELAY_MS: 60,
             MAX_STAGGER_STEPS: 8,          // keeps 20-photo posts from animating for seconds
-            SLIDE_OFFSET: '1.25rem'
+            SLIDE_OFFSET: '1.25rem',
+            CURTAIN_FADE_MS: 150
         },
 
         // Timing
@@ -75,7 +82,11 @@
             MISSING_MEDIA_HOLD_MS: 1000,   // how long X's half-loaded layout stays hidden during that wait, so it never flashes
             VIEWER_WAIT_MS: 2000,          // how long to wait for X's viewer to open after a click
             VIEWER_POLL_MS: 100,
-            VIEWER_STEP_DELAY_MS: 250      // pause before each arrow key so the viewer is ready for it
+            VIEWER_STEP_DELAY_MS: 250,     // pause before each arrow key so the viewer is ready for it
+            VIEWER_STEP_CONFIRM_MS: 600,   // how long to wait for the viewer to react to an arrow key before trying again
+            LINK_RESTORE_DELAY_MS: 250,    // how long a temporarily changed photo link stays changed, in case X reads it a moment late
+            GRID_RESTORE_WINDOW_MS: 5000,  // how long restores are counted for the safety limit below
+            CURTAIN_MAX_MS: 4000           // the cover always comes down by then, even if something went wrong
         },
 
         // Selectors
@@ -89,8 +100,11 @@
             CAROUSEL_SLOT: '[style*="aspect-ratio"]',
             // X's invisible full-size button over a video, which opens the media viewer
             VIDEO_OPEN_CONTROL: '[data-slot="xds-context-menu-trigger"] > button',
+            // X's media viewer window, used as one of the places an arrow key is sent to
+            VIEWER_DIALOG: '[role="dialog"], [aria-modal="true"]',
             VIDEO_OR_GIF: 'video, [data-testid="videoPlayer"], [data-testid="videoComponent"], [data-testid="playButton"]',
             ARTICLE_TAG: 'ARTICLE',
+            QUOTE_FRAME: '[data-slot="embedded-tweet-frame"]',
             TWEET_WRAPPER: '[data-testid="tweet"], article',
             // Anything that proves a container holds more than just the photos
             TEXT_MARKERS: '[data-testid="tweetText"], [data-testid="User-Name"], time, [dir="auto"]'
@@ -113,11 +127,22 @@
             INSTANT: 'xiv-instant',
             UNCAPPED: 'xiv-uncapped',
             PLAY_BADGE: 'xiv-play-badge',
-            HOLDING: 'xiv-holding'
+            HOLDING: 'xiv-holding',
+            CURTAIN: 'xiv-curtain'
+        },
+
+        // Limits
+        LIMITS: {
+            QUOTE_MAX_TILES: 4,            // a quoted post with more pictures than this keeps X's compact carousel
+            MAX_GRID_RESTORES: 3,          // more restores than this in one window means X is fighting us, so stop
+            VIEWER_STEP_ATTEMPTS: 4        // tries per arrow-key step before giving up
         },
 
         // Patterns
         VIEWER_PATH_PATTERN: /\/(photo|video)\/\d+/,   // the address X shows while its media viewer is open
+        VIEWER_SUFFIX_PATTERN: /\/(photo|video)\/\d+$/, // the part of a viewer address that follows the post's own address
+        MEDIA_VIEW_PATH_PATTERN: /\/mediaviewer$/,      // the address of X's other viewer page, opened by "View media"
+        POST_PATH_PATTERN: /^\/[^/]+\/status\/\d+$/,    // the address of a post itself
 
         // Key Codes
         KEY_CODES: {
@@ -185,6 +210,16 @@
 
         sum(numbers) {
             return numbers.reduce((total, n) => total + n, 0);
+        },
+
+        // The path part of a link, or null when the link can't be read. Addresses are only
+        // used for opening videos, so an unreadable one must never stop the layout itself.
+        toPath(href) {
+            try {
+                return new URL(href, window.location.href).pathname;
+            } catch (error) {
+                return null;
+            }
         }
     };
 
@@ -363,6 +398,15 @@
                 /* Keeps the post's space while hiding X's half-loaded layout */
                 .${C.HOLDING} { visibility: hidden !important; }
 
+                /* Covers the page while the viewer is steered to a video, then fades away */
+                .${C.CURTAIN} {
+                    position: fixed !important;
+                    inset: 0 !important;
+                    z-index: 2147483647 !important;
+                    background: ${L.CURTAIN_BG} !important;
+                    transition: opacity ${A.CURTAIN_FADE_MS}ms ease-out !important;
+                }
+
                 @media (prefers-color-scheme: dark) {
                     .${C.GRID} { border-color: ${L.BORDER_COLOR_DARK} !important; }
                     .${C.ITEM} { background-color: ${L.BG_COLOR_DARK} !important; }
@@ -484,37 +528,125 @@
             return new Promise(resolve => setTimeout(resolve, ms));
         },
 
-        async waitForViewer() {
+        async waitForPath(pattern) {
             const deadline = Date.now() + CONFIG.TIMING.VIEWER_WAIT_MS;
             while (Date.now() < deadline) {
-                if (CONFIG.VIEWER_PATH_PATTERN.test(window.location.pathname)) return true;
+                if (pattern.test(window.location.pathname)) return true;
                 await this.delay(CONFIG.TIMING.VIEWER_POLL_MS);
             }
             return false;
         },
 
-        pressKey(key) {
-            const target = document.activeElement || document.body;
+        // A dark cover over the page while the viewer is steered, so the neighbouring photo it
+        // may pass through is never seen. Returns the function that lowers it.
+        raiseCurtain() {
+            if (!CONFIG.COVER_VIEWER_WHILE_STEPPING) return () => {};
+            const curtain = document.createElement('div');
+            curtain.className = CONFIG.CLASSES.CURTAIN;
+            document.body.appendChild(curtain);
+
+            let isLowered = false;
+            const lower = () => {
+                if (isLowered) return;
+                isLowered = true;
+                clearTimeout(safetyTimer);
+                curtain.style.opacity = '0';
+                setTimeout(() => curtain.remove(), CONFIG.ANIMATION.CURTAIN_FADE_MS);
+            };
+            const safetyTimer = setTimeout(lower, CONFIG.TIMING.CURTAIN_MAX_MS);
+            return lower;
+        },
+
+        // Each retry aims at a different place, since it is not known which one X's viewer listens on
+        pressKey(key, attempt) {
+            const targets = [
+                document.activeElement,
+                document.querySelector(CONFIG.SELECTORS.VIEWER_DIALOG),
+                document.body,
+                document
+            ];
+            const target = targets[attempt % targets.length] || document.body;
             const init = { key, code: key, keyCode: CONFIG.KEY_CODES[key], which: CONFIG.KEY_CODES[key], bubbles: true, cancelable: true };
             target.dispatchEvent(new KeyboardEvent('keydown', init));
             target.dispatchEvent(new KeyboardEvent('keyup', init));
         },
 
+        async waitForPathChange(fromPath) {
+            const deadline = Date.now() + CONFIG.TIMING.VIEWER_STEP_CONFIRM_MS;
+            while (Date.now() < deadline) {
+                if (window.location.pathname !== fromPath) return true;
+                await this.delay(CONFIG.TIMING.VIEWER_POLL_MS);
+            }
+            return false;
+        },
+
+        // One arrow-key step, repeated until the viewer visibly moves (its address changes),
+        // because it may not be listening yet when the first key arrives
+        async stepOnce(key) {
+            for (let attempt = 0; attempt < CONFIG.LIMITS.VIEWER_STEP_ATTEMPTS; attempt++) {
+                const before = window.location.pathname;
+                await this.delay(CONFIG.TIMING.VIEWER_STEP_DELAY_MS);
+                this.pressKey(key, attempt);
+                if (await this.waitForPathChange(before)) return true;
+            }
+            return false;
+        },
+
+        // Clicks a photo link as if it pointed at another address. If X follows the link's
+        // address, this lands straight on the video; if X follows its own internal target,
+        // the photo opens as usual. The link is put back right afterwards.
+        clickWithAddress(anchor, path) {
+            const original = anchor.getAttribute('href');
+            anchor.setAttribute('href', path);
+            anchor.click();
+            setTimeout(() => {
+                if (anchor.getAttribute('href') === path) anchor.setAttribute('href', original);
+            }, CONFIG.TIMING.LINK_RESTORE_DELAY_MS);
+        },
+
         // X's own "View media" button for a video opens a different-looking viewer page.
-        // Opening the neighbouring photo and stepping over with the arrow key gives the
-        // normal viewer, exactly as clicking through by hand does. If the stepping fails,
-        // the viewer simply stays on that photo.
-        async openViaPhoto({ anchor, key, steps }) {
+        // The normal viewer is reached through a photo: first by trying the video's own
+        // address, and if X ignores that, by opening the neighbouring photo and stepping
+        // over with the arrow key, exactly as clicking through by hand does. If stepping
+        // fails, the viewer simply stays on that photo.
+        async openViaPhoto({ anchor, key, steps, targetPath }) {
             this.busy = true;
+            const lowerCurtain = this.raiseCurtain();
             try {
-                anchor.click();
-                if (!(await this.waitForViewer())) return;
+                if (CONFIG.OPEN_VIDEOS_DIRECTLY && targetPath) this.clickWithAddress(anchor, targetPath);
+                else anchor.click();
+
+                if (!(await this.waitForPath(CONFIG.VIEWER_PATH_PATTERN))) return;
+                if (targetPath && window.location.pathname === targetPath) {
+                    Logger.log('Opener', 'Opened the video directly.');
+                    return;
+                }
+
+                Logger.log('Opener', 'X opened the photo instead, so stepping over to the video.');
                 for (let step = 0; step < steps; step++) {
-                    await this.delay(CONFIG.TIMING.VIEWER_STEP_DELAY_MS);
-                    this.pressKey(key);
+                    if (await this.stepOnce(key)) continue;
+                    Logger.warn('Opener', 'The viewer did not move on to the video. Use its arrows to continue.');
+                    return;
                 }
             } catch (error) {
-                Logger.warn('Opener', 'Could not step to the video in the viewer. Use the viewer arrows instead.', error);
+                Logger.warn('Opener', 'Could not open the video in the viewer. Use the viewer arrows instead.', error);
+            } finally {
+                lowerCurtain();
+                this.busy = false;
+            }
+        },
+
+        // Posts with no photo to start from can only use X's "View media" button. Its page is
+        // addressed .../mediaviewer?..., so the address bar is changed to the familiar /video/N.
+        async openViaViewerButton(data) {
+            this.busy = true;
+            try {
+                data.originalAnchor.click();
+                if (!CONFIG.TIDY_VIEWER_ADDRESS || !data.targetPath) return;
+                if (!(await this.waitForPath(CONFIG.MEDIA_VIEW_PATH_PATTERN))) return;
+                window.history.replaceState(window.history.state, '', data.targetPath);
+            } catch (error) {
+                Logger.warn('Opener', 'Could not tidy the video address. The video itself still opened.', error);
             } finally {
                 this.busy = false;
             }
@@ -522,11 +654,15 @@
 
         open(data) {
             if (this.busy) return;
-            if (CONFIG.OPEN_VIDEOS_VIA_PHOTO_VIEWER && data.viaPhoto) {
-                this.openViaPhoto(data.viaPhoto);
+            if (!data.isVideo) {
+                if (data.originalAnchor) data.originalAnchor.click();
                 return;
             }
-            if (data.originalAnchor) data.originalAnchor.click();
+            if (CONFIG.OPEN_VIDEOS_VIA_PHOTO_VIEWER && data.viaPhoto) {
+                this.openViaPhoto({ ...data.viaPhoto, targetPath: data.targetPath });
+                return;
+            }
+            if (data.originalAnchor) this.openViaViewerButton(data);
         }
     };
 
@@ -690,6 +826,79 @@
     // MATH & LAYOUT ENGINE (orchestrates measuring, building, and swapping)
     // ---------------------------------------------------------------
     const MathEngine = {
+        // The grid built for each post, so a re-render by X can be answered with the same grid
+        postGrids: new WeakMap(),
+        // Roots of re-rendered posts that are showing the previous grid while their images load
+        adoptedRoots: new WeakSet(),
+
+        rememberGrid(mediaRoot, grid, count) {
+            const post = mediaRoot.closest(CONFIG.SELECTORS.TWEET_WRAPPER);
+            if (!post) return;
+            const previous = this.postGrids.get(post);
+            if (previous && previous.grid !== grid) previous.grid.remove();
+            this.postGrids.set(post, { grid, count, path: DOMProcessor.findPostPath(mediaRoot) });
+        },
+
+        // X may drop our grid when it re-renders a post, and its fresh layout is blank until
+        // its images load. Putting the same grid straight back (before the browser paints)
+        // and hiding X's copy means the post never shows a gap.
+        adoptExistingGrid(mediaRoot, slotCount) {
+            if (!CONFIG.KEEP_GRID_ON_RERENDER) return;
+            if (this.adoptedRoots.has(mediaRoot) || !mediaRoot.parentNode) return;
+            const post = mediaRoot.closest(CONFIG.SELECTORS.TWEET_WRAPPER);
+            const record = post ? this.postGrids.get(post) : null;
+            if (!record || record.count !== slotCount) return;
+            if (record.path !== DOMProcessor.findPostPath(mediaRoot)) return;
+
+            if (!this.isRestoreAllowed(record)) return;
+
+            // Moving a grid that is still on the page would only cause extra churn
+            if (record.grid.parentNode !== mediaRoot.parentNode) {
+                this.placeGrid(record.grid, mediaRoot);
+            }
+            Logger.log('Layout', 'X re-rendered a post, so its grid was kept.');
+            mediaRoot.classList.remove(CONFIG.CLASSES.PROCESSING, CONFIG.CLASSES.HOLDING);
+            mediaRoot.classList.add(CONFIG.CLASSES.HIDDEN_ORIGINAL);
+            this.adoptedRoots.add(mediaRoot);
+        },
+
+        // A grid that was dropped and re-attached must not replay its fade-in
+        placeGrid(grid, mediaRoot) {
+            grid.classList.add(CONFIG.CLASSES.INSTANT);
+            grid.classList.remove(CONFIG.CLASSES.GRID_HIDDEN, CONFIG.CLASSES.ANIMATING);
+            grid.style.height = '';
+            grid.querySelectorAll('img').forEach(img => img.setAttribute('loading', 'eager'));
+            mediaRoot.parentNode.insertBefore(grid, mediaRoot.nextSibling);
+        },
+
+        // Circuit breaker: if X keeps removing the grid, stop putting it back
+        isRestoreAllowed(record) {
+            const now = Date.now();
+            record.restores = (record.restores || []).filter(time => now - time < CONFIG.TIMING.GRID_RESTORE_WINDOW_MS);
+            if (record.restores.length >= CONFIG.LIMITS.MAX_GRID_RESTORES) {
+                Logger.warn('Layout', 'X keeps re-rendering this post, so its grid is being rebuilt instead of kept.');
+                return false;
+            }
+            record.restores.push(now);
+            return true;
+        },
+
+        // Points the kept grid's tiles at the new page elements so clicks still open the viewer.
+        // Returns false when the media changed, so the caller rebuilds the grid normally.
+        rebindAdopted(mediaRoot, mediaData) {
+            if (!this.adoptedRoots.has(mediaRoot)) return false;
+            this.adoptedRoots.delete(mediaRoot);
+
+            const post = mediaRoot.closest(CONFIG.SELECTORS.TWEET_WRAPPER);
+            const record = post ? this.postGrids.get(post) : null;
+            if (!record) return false;
+
+            const tiles = record.grid.querySelectorAll(`.${CONFIG.CLASSES.ITEM}`);
+            if (tiles.length !== mediaData.length) return false;
+            tiles.forEach((tile, index) => GridBuilder.sources.set(tile, mediaData[index]));
+            return true;
+        },
+
         restoreOriginal(mediaRoot, grid) {
             if (grid && grid.parentNode) grid.remove();
             mediaRoot.classList.remove(CONFIG.CLASSES.PROCESSING, CONFIG.CLASSES.HIDDEN_ORIGINAL, CONFIG.CLASSES.HOLDING);
@@ -736,6 +945,7 @@
                 mediaRoot.parentNode.insertBefore(grid, mediaRoot.nextSibling);
                 mediaRoot.classList.remove(CONFIG.CLASSES.PROCESSING, CONFIG.CLASSES.HOLDING);
                 mediaRoot.classList.add(CONFIG.CLASSES.HIDDEN_ORIGINAL);
+                this.rememberGrid(mediaRoot, grid, mediaData.length);
 
                 if (isCached) {
                     grid.classList.add(CONFIG.CLASSES.INSTANT);
@@ -757,8 +967,14 @@
         waitingSince: new WeakMap(),
         recheckScheduled: new WeakSet(),
 
-        markProcessed(photos) {
-            photos.forEach(photo => photo.classList.add(CONFIG.CLASSES.PROCESSED));
+        // Every kind of media item that has not been handled yet
+        unprocessedSelector: CONFIG.SELECTORS.MEDIA_ITEM
+            .split(',')
+            .map(part => `${part.trim()}:not(.${CONFIG.CLASSES.PROCESSED})`)
+            .join(', '),
+
+        markProcessed(mediaNodes) {
+            mediaNodes.forEach(node => node.classList.add(CONFIG.CLASSES.PROCESSED));
         },
 
         // Walks up from a photo to the outermost block that holds only media
@@ -777,8 +993,10 @@
         },
 
         isFreshRoot(mediaRoot) {
-            return !mediaRoot.classList.contains(CONFIG.CLASSES.HIDDEN_ORIGINAL) &&
-                   !mediaRoot.classList.contains(CONFIG.CLASSES.PROCESSING);
+            if (mediaRoot.classList.contains(CONFIG.CLASSES.PROCESSING)) return false;
+            // A re-rendered post showing its kept grid still has to be reconnected to its new media
+            return MathEngine.adoptedRoots.has(mediaRoot) ||
+                   !mediaRoot.classList.contains(CONFIG.CLASSES.HIDDEN_ORIGINAL);
         },
 
         findMediaRoots(items) {
@@ -802,6 +1020,23 @@
             return Boolean(firstMedia) && !mediaRoot.contains(firstMedia);
         },
 
+        // X shows a quoted post's picture as a small thumbnail beside long text (media and text sit
+        // in one horizontal row). Rebuilding it would squeeze the text, so X's own layout is kept.
+        isQuoteThumbnail(mediaRoot) {
+            if (!CONFIG.KEEP_QUOTE_THUMBNAILS) return false;
+            if (!mediaRoot.closest(CONFIG.SELECTORS.QUOTE_FRAME) || !mediaRoot.parentElement) return false;
+            const style = window.getComputedStyle(mediaRoot.parentElement);
+            return style.display.includes('flex') && style.flexDirection.startsWith('row');
+        },
+
+        // A long grid is fine as the main post but tiresome repeated inside every quote
+        // while scrolling through a post's quotes, so big quoted sets stay as X draws them.
+        isOversizedQuote(mediaRoot) {
+            if (!mediaRoot.closest(CONFIG.SELECTORS.QUOTE_FRAME)) return false;
+            const count = this.countCarouselSlots(mediaRoot) || mediaRoot.querySelectorAll(CONFIG.SELECTORS.MEDIA_ITEM).length;
+            return count > CONFIG.LIMITS.QUOTE_MAX_TILES;
+        },
+
         // A video can only become a tile if it has a thumbnail to show
         areVideosTileable(mediaRoot) {
             const videos = Array.from(mediaRoot.querySelectorAll('video'));
@@ -809,9 +1044,11 @@
         },
 
         shouldLeaveAlone(mediaRoot) {
-            if (this.isQuotedSecondaryMedia(mediaRoot)) return true;
+            if (this.isQuotedSecondaryMedia(mediaRoot) || this.isQuoteThumbnail(mediaRoot) || this.isOversizedQuote(mediaRoot)) return true;
             if (!mediaRoot.querySelector(CONFIG.SELECTORS.VIDEO_OR_GIF)) return false;
-            return !CONFIG.INCLUDE_VIDEO_TILES || !this.areVideosTileable(mediaRoot);
+            if (!CONFIG.INCLUDE_VIDEO_TILES || !this.areVideosTileable(mediaRoot)) return true;
+            // A lone video keeps X's own player; a grid only makes sense for several items
+            return mediaRoot.querySelectorAll(CONFIG.SELECTORS.MEDIA_ITEM).length < 2;
         },
 
         isMediaReady(item) {
@@ -881,11 +1118,35 @@
             return null;
         },
 
+        // The post's own address, taken from a photo link such as /user/status/123/photo/3
+        basePathOf(anchor) {
+            const path = Utils.toPath(anchor.getAttribute('href'));
+            return path ? path.replace(CONFIG.VIEWER_SUFFIX_PATTERN, '') : null;
+        },
+
+        // The post's own address, taken from the link on its timestamp (used when there is no photo)
+        findPostPath(node) {
+            const post = node.closest(CONFIG.SELECTORS.TWEET_WRAPPER);
+            if (!post) return null;
+            for (const link of post.querySelectorAll('a[href*="/status/"]')) {
+                const path = Utils.toPath(link.getAttribute('href'));
+                if (path && CONFIG.POST_PATH_PATTERN.test(path)) return path;
+            }
+            return null;
+        },
+
+        // The normal address of a video: its position in the post, counting from 1
+        buildVideoPath(video, viaPhoto, number) {
+            const base = viaPhoto ? this.basePathOf(viaPhoto.anchor) : this.findPostPath(video);
+            return base ? `${base}/video/${number}` : null;
+        },
+
         extractMediaData(items) {
             return items.map((item, index) => {
                 if (item.tagName !== 'VIDEO') return this.extractPhotoData(item);
                 const data = this.extractVideoData(item);
                 data.viaPhoto = this.findNeighborPhoto(items, index);
+                data.targetPath = this.buildVideoPath(item, data.viaPhoto, index + 1);
                 return data;
             });
         },
@@ -921,7 +1182,7 @@
             }, Math.max(delayMs, 0));
         },
 
-        handleMissingMedia(mediaRoot, photos) {
+        handleMissingMedia(mediaRoot, mediaNodes) {
             const holdMs = CONFIG.TIMING.MISSING_MEDIA_HOLD_MS;
             const limitMs = CONFIG.TIMING.MISSING_MEDIA_WAIT_MS;
             const waited = this.getWaitedMs(mediaRoot);
@@ -930,7 +1191,7 @@
                 // Leaving X's own layout is safer than a grid that is missing a video
                 mediaRoot.classList.remove(CONFIG.CLASSES.HOLDING);
                 Logger.log('Scan', 'A video never finished loading, so this post was left as X draws it.');
-                this.markProcessed(photos);
+                this.markProcessed(mediaNodes);
                 return;
             }
 
@@ -941,27 +1202,38 @@
             this.scheduleRecheck(mediaRoot, (isHolding ? holdMs : limitMs) - waited);
         },
 
+        // Quoted-tweet media never has a grid of its own, so it must not take the post's grid
+        keepPreviousGrid(mediaRoot, mediaCount) {
+            if (this.isQuotedSecondaryMedia(mediaRoot) || this.isQuoteThumbnail(mediaRoot)) return;
+            MathEngine.adoptExistingGrid(mediaRoot, this.countCarouselSlots(mediaRoot) || mediaCount);
+        },
+
         processRoot(mediaRoot) {
-            const photos = mediaRoot.querySelectorAll(CONFIG.SELECTORS.PHOTO);
+            // Photos and videos together, in the order X shows them
+            const mediaNodes = mediaRoot.querySelectorAll(CONFIG.SELECTORS.MEDIA_ITEM);
+            this.keepPreviousGrid(mediaRoot, mediaNodes.length);
 
             if (this.shouldLeaveAlone(mediaRoot)) {
-                this.markProcessed(photos);
+                this.markProcessed(mediaNodes);
                 return;
             }
 
-            // Photos and videos together, in the order X shows them
-            const items = Array.from(mediaRoot.querySelectorAll(CONFIG.SELECTORS.MEDIA_ITEM));
+            const items = Array.from(mediaNodes);
             if (items.length === 0 || !items.every(item => this.isMediaReady(item))) return;
 
             if (this.isMissingMedia(mediaRoot, items.length)) {
-                this.handleMissingMedia(mediaRoot, photos);
+                this.handleMissingMedia(mediaRoot, mediaNodes);
                 return;
             }
 
             const mediaData = this.extractMediaData(items);
+            if (MathEngine.rebindAdopted(mediaRoot, mediaData)) {
+                this.markProcessed(mediaNodes);
+                return;
+            }
             const cacheKey = mediaData.map(d => d.src.split('?')[0]).join('|');
 
-            this.markProcessed(photos);
+            this.markProcessed(mediaNodes);
             mediaRoot.classList.add(CONFIG.CLASSES.PROCESSING);
 
             MathEngine.process(mediaData, mediaRoot, cacheKey).catch(error => {
@@ -971,9 +1243,8 @@
         },
 
         scan(scopeNode = document) {
-            const items = scopeNode.querySelectorAll(
-                `${CONFIG.SELECTORS.PHOTO}:not(.${CONFIG.CLASSES.PROCESSED})`
-            );
+            // Posts made only of videos have no photo links, so videos start a scan too
+            const items = scopeNode.querySelectorAll(this.unprocessedSelector);
             if (items.length === 0) return;
 
             this.findMediaRoots(items).forEach(root => {
