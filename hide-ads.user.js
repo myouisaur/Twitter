@@ -2,7 +2,7 @@
 // @name         [Twitter] Hide Ads
 // @namespace    https://github.com/myouisaur/Twitter
 // @icon         https://www.x.com/favicon.ico
-// @version      1.6
+// @version      1.8
 // @description  Finds promoted posts on X (Twitter) and marks them so they are easy to spot, with an option to hide them completely.
 // @author       Xiv
 // @match        *://*.x.com/*
@@ -253,9 +253,17 @@
                     stroke-linejoin: round !important;
                     pointer-events: none !important;
                 }
-                .${C.BAR_BUTTON}:hover {
+                /* Locked: filled dark with an orange padlock. Unlocked: outline only.
+                   Hovering shows the look of the other state, the one a click would switch to */
+                .${C.BAR_BUTTON}[${CONFIG.ATTRIBUTE_ICON_STATE}="locked"],
+                .${C.BAR_BUTTON}[${CONFIG.ATTRIBUTE_ICON_STATE}="unlocked"]:hover {
                     background: ${L.BADGE_TEXT_COLOR} !important;
                     color: ${L.ACCENT_COLOR} !important;
+                }
+                .${C.BAR_BUTTON}[${CONFIG.ATTRIBUTE_ICON_STATE}="unlocked"],
+                .${C.BAR_BUTTON}[${CONFIG.ATTRIBUTE_ICON_STATE}="locked"]:hover {
+                    background: transparent !important;
+                    color: ${L.BADGE_TEXT_COLOR} !important;
                 }
                 .${C.BAR_BUTTON}:focus-visible {
                     outline: 0.1875rem solid ${L.BADGE_TEXT_COLOR} !important;
